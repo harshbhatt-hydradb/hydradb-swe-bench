@@ -1,0 +1,42 @@
+# Local credentials (keep the safe example template tracked)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments and generated files
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test, lint, and coverage artifacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Agent outputs and downloaded target repositories
+runs/
+/targets/
+*.log
+
+# Editor and operating-system files
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo

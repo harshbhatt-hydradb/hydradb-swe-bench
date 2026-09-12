@@ -1,0 +1,3 @@
+# The sandbox image needs no local source, run artifacts, or credentials.
+**
+!Dockerfile.sandbox

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hydra-swe-bench"
+version = "0.1.0"
+description = "Azure OpenAI coding agent and controlled HydraDB memory experiments"
+requires-python = ">=3.11.8"
+dependencies = ["openai>=1.99,<3", "python-dotenv>=1.0,<2", "httpx>=0.28,<1"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+hydra-agent = "hydra_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hydra_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
