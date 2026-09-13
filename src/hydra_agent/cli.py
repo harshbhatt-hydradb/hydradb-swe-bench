@@ -14,6 +14,7 @@ from .config import AzureConfig, HydraConfig
 from .environment import Workspace
 from .hydradb import HydraMemory
 from .indexing import build_corpus, reuse_corpus
+from .interactive import chat_session
 from .memory import MemoryScope
 from .model import AzureModel
 
@@ -26,11 +27,9 @@ def main() -> int:
         "doctor", help="Validate configuration; --live checks Azure connectivity"
     )
     doctor.add_argument("--live", action="store_true")
-    run = sub.add_parser(
-        "run", help="Solve an issue in a disposable copy of a committed repository"
-    )
+    run = argparse.ArgumentParser(add_help=False)
     run.add_argument("--repo", type=Path, required=True)
-    task = run.add_mutually_exclusive_group(required=True)
+    task = run.add_mutually_exclusive_group()
     task.add_argument("--task")
     task.add_argument("--task-file", type=Path)
     run.add_argument("--revision", default="HEAD")
@@ -59,7 +58,11 @@ def main() -> int:
     run.add_argument("--index-max-bytes", type=int, default=50_000_000)
     for field, default in asdict(Limits()).items():
         run.add_argument("--" + field.replace("_", "-"), type=int, default=default)
+    sub.add_parser("run", parents=[run], help="Solve one issue in a disposable repository")
+    sub.add_parser("chat", parents=[run], help="Interactive conversation in a persistent sandbox")
     args = parser.parse_args()
+    if args.action == "run" and args.task is None and args.task_file is None:
+        parser.error("run requires --task or --task-file")
     load_dotenv(args.env_file, override=False)
     model = None
     memory = None
@@ -85,8 +88,12 @@ def main() -> int:
         if args.backend == "local" and not args.allow_local_shell:
             raise ValueError("Local execution requires --allow-local-shell; it is not a sandbox")
         limits = Limits(**{key: getattr(args, key) for key in asdict(Limits())})
-        task_text = args.task if args.task is not None else args.task_file.read_text()
-        if not task_text.strip():
+        task_text = (
+            args.task
+            if args.task is not None
+            else (args.task_file.read_text() if args.task_file else None)
+        )
+        if task_text is not None and not task_text.strip():
             raise ValueError("Task must not be empty")
         hydra_config = HydraConfig.from_env() if args.memory == "hydradb" else None
         if args.reuse_index and not hydra_config:
@@ -115,6 +122,7 @@ def main() -> int:
             "memory": args.memory,
             "limits": asdict(limits),
             "sdk_max_retries": 2,
+            "action": args.action,
         }
         (output / "manifest.json").write_text(json.dumps(metadata, indent=2) + "\n")
         try:
@@ -191,6 +199,17 @@ def main() -> int:
                     (output / "manifest.json").write_text(json.dumps(metadata, indent=2) + "\n")
                     print("Repository graph ready. Starting coding agent.", flush=True)
                 model = AzureModel(config)
+                if args.action == "chat":
+                    return chat_session(
+                        model,
+                        workspace,
+                        limits,
+                        trace,
+                        output,
+                        memory=memory,
+                        scope=scope if memory else None,
+                        initial_task=task_text,
+                    )
                 result = run_agent(
                     model,
                     workspace,

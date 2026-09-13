@@ -44,30 +44,41 @@ def execute(
         start_new_session=True,
     ) as proc:
         assert proc.stdout is not None
-        with selectors.DefaultSelector() as selector:
-            selector.register(proc.stdout, selectors.EVENT_READ)
-            while selector.get_map():
-                if time.monotonic() - start >= timeout:
-                    timed_out = True
-                    break
-                for key, _ in selector.select(timeout=min(0.1, timeout)):
-                    chunk = os.read(key.fileobj.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    else:
-                        total += len(chunk)
-                        output.extend(chunk[: max(0, limit - len(output))])
-            if not timed_out:
-                try:
-                    proc.wait(timeout=max(0.01, timeout - (time.monotonic() - start)))
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-            # Also stop background descendants when the main shell finishes.
+        try:
+            return _collect(proc, start, timeout, limit, output, total, timed_out)
+        finally:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             proc.wait()
+
+
+def _collect(proc, start, timeout, limit, output, total, timed_out):
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            if time.monotonic() - start >= timeout:
+                timed_out = True
+                break
+            for key, _ in selector.select(timeout=min(0.1, timeout)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                else:
+                    total += len(chunk)
+                    output.extend(chunk[: max(0, limit - len(output))])
+        if not timed_out:
+            try:
+                proc.wait(timeout=max(0.01, timeout - (time.monotonic() - start)))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        # Also stop background descendants when the main shell finishes.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
     return CommandResult(
         output.decode("utf-8", errors="replace"),
         124 if timed_out else proc.returncode,
@@ -257,6 +268,21 @@ class Workspace:
         if result.exit_code or result.truncated:
             raise RuntimeError("Patch extraction failed or exceeded 10 MB")
         return result.output
+
+    def interrupt(self) -> None:
+        """Stop outstanding commands in this disposable container, retaining its PID 1."""
+        if self.backend != "docker":
+            return  # execute() already kills the local command process group.
+        code = (
+            "import os, signal\n"
+            "for entry in os.listdir('/proc'):\n"
+            " if entry.isdigit() and int(entry) not in (1, os.getpid()):\n"
+            "  try: os.kill(int(entry), signal.SIGKILL)\n"
+            "  except ProcessLookupError: pass\n"
+        )
+        result = execute(["docker", "exec", self.container, "python", "-c", code], timeout=10)
+        if result.exit_code:
+            raise RuntimeError("Cannot stop sandbox commands safely; session must close")
 
     def changed_paths(self) -> set[str]:
         """Files changed from the indexed snapshot, including staged changes and deletions."""

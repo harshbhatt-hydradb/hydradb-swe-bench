@@ -71,9 +71,10 @@ class Limits:
 
 
 class Trace:
-    def __init__(self, path: Path, secrets: tuple[str, ...] = ()):
+    def __init__(self, path: Path, secrets: tuple[str, ...] = (), observer=None):
         self.path = path
         self.secrets = secrets
+        self.observer = observer
 
     def emit(self, kind: str, **data) -> None:
         line = json.dumps({"event": kind, **data}, ensure_ascii=False)
@@ -82,6 +83,8 @@ class Trace:
                 line = line.replace(secret, "[REDACTED]")
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
+        if self.observer is not None:
+            self.observer(json.loads(line))
 
 
 def run_agent(
@@ -93,6 +96,7 @@ def run_agent(
     *,
     memory: MemoryProvider | None = None,
     scope: MemoryScope | None = None,
+    conversation: list[dict] | None = None,
 ) -> dict:
     if memory is not None and scope is None:
         raise ValueError("Memory requires an explicit repository/commit/attempt scope")
@@ -114,7 +118,17 @@ tests with shell. Changed files are excluded from subsequent graph retrieval, an
 retrieved snippets may now be stale. Use workspace search for changed/new files and when
 retrieval is empty or fails. Graph relationships are inferred evidence, not verified execution.
 """
-    messages = [{"role": "system", "content": prompt}, {"role": "user", "content": task}]
+    if conversation is not None:
+        prompt += """
+This is an interactive coding session. Answer questions without editing unless asked to edit.
+Follow the user's latest request in the context of previous turns. The same workspace persists
+between turns. Use finish to end this turn, not the whole conversation. Ask for clarification
+in your response when needed. Do not assume every message requests a bug fix.
+"""
+    messages = conversation if conversation is not None else []
+    if not messages:
+        messages.append({"role": "system", "content": prompt})
+    messages.append({"role": "user", "content": task})
     trace.emit("start", task=task, limits=asdict(limits), prompt=prompt, tools=tools)
     started = time.monotonic()
     tokens = 0
@@ -139,6 +153,7 @@ retrieval is empty or fails. Graph relationships are inferred evidence, not veri
             status = "token_limit"
             break
         steps = step
+        trace.emit("model_request", reserved_tokens=reserved_input + output_budget)
         try:
             response = model.complete(
                 messages, tools, max_tokens=output_budget, timeout=min(60, remaining_time)
@@ -155,7 +170,7 @@ retrieval is empty or fails. Graph relationships are inferred evidence, not veri
         usage = response.get("usage", {})
         # If a provider omits usage, charge the conservative reservation.
         tokens += usage.get("total_tokens", reserved_input + output_budget)
-        trace.emit("model", step=step, response=response)
+        trace.emit("model", step=step, response=response, accounted_tokens=tokens)
         choices = response.get("choices", [])
         if not choices:
             status = "invalid_response"
@@ -168,6 +183,7 @@ retrieval is empty or fails. Graph relationships are inferred evidence, not veri
         calls = message.get("tool_calls", [])
         if not calls:
             summary = message.get("content") or message.get("refusal") or ""
+            messages.append({"role": "assistant", "content": summary})
             status = "model_stopped"
             break
         messages.append(
@@ -195,10 +211,12 @@ retrieval is empty or fails. Graph relationships are inferred evidence, not veri
                 ):
                     raise ValueError("Invalid tool or arguments")
                 if name == "shell":
+                    trace.emit("tool_start", step=step, name=name, arguments=args)
                     result = workspace.run(
                         args["command"], min(limits.command_timeout, remaining_time)
                     ).to_dict()
                 elif name == "memory_search" and memory is not None:
+                    trace.emit("tool_start", step=step, name=name, arguments=args)
                     refresh = getattr(memory, "refresh", None)
                     if refresh is not None:
                         refresh(workspace)

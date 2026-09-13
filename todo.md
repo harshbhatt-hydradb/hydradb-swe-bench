@@ -4,6 +4,8 @@ Checked items are implemented and verified offline unless explicitly qualified. 
 
 ## 1. Establish the experiment and Azure harness
 
+- [x] **Add interactive sandbox chat.** `hydra-agent chat` keeps one container, model conversation, and memory provider across user turns. Show tool progress, support multiline messages and diff/save/status/clear/exit commands, export cumulative patches after turns, and clean up on exit. Reused graphs are attached once, not rebuilt for follow-ups. Session token accounting, interruption cleanup, protocol completion, and separate non-benchmark artifacts are included. Full-screen UI, streaming, automatic compaction, and session resume remain future work.
+
 - [x] **Write the design memo.** Define the research hypothesis, repository graph, retrieval policy, isolation boundaries, experimental controls, measurements, and failure modes in `design-memo.md`. Distinguish repository knowledge, attempt memory, and cross-session memory so results have a precise interpretation.
 - [x] **Scaffold the Python project.** Provide a CLI, package metadata, ignored credential/run files, an environment template, development dependencies, and a lockfile. Acceptance: the locked environment installs and the command's help works.
 - [x] **Implement Azure configuration and model adapter.** Load the key, endpoint, deployment name, and optional reasoning effort from the environment. Validate required settings, normalize the v1 endpoint, use the official SDK, and avoid assuming which model is deployed. Acceptance: mocked SDK tests verify request routing and settings without exposing keys.

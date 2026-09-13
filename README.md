@@ -19,6 +19,52 @@ docker build -f Dockerfile.sandbox -t hydra-agent-sandbox:local .
 
 The Azure deployment must support Chat Completions and function calling. The provider uses the [Azure v1 endpoint](https://learn.microsoft.com/en-us/azure/foundry-classic/openai/how-to/switching-endpoints) with the official OpenAI Python SDK. An API key alone is insufficient: the resource endpoint and deployment name are also required. Environment variables override `.env`; use `--env-file PATH` **before** the subcommand to select another file. Never paste credentials into task prompts or commit `.env`.
 
+## Interactive terminal chat
+
+Use `chat` for back-and-forth conversation in one persistent sandbox. From this
+project directory, using the existing YogaIntelliJ graph:
+
+```sh
+colima start hydra-swe
+export DOCKER_CONTEXT=colima-hydra-swe
+uv run hydra-agent chat \
+  --repo targets/YogaIntelliJ \
+  --revision 2cc0eaa7ea5c07b75911a9eefc8484b94826036d \
+  --memory hydradb \
+  --reuse-index runs/19fe9877a5504235920aaf66012525dc/index-manifest.json
+```
+
+At `You ›`, ask a question or request a change, then send follow-ups. The model
+receives earlier messages and tool results, and the same container retains file
+edits between turns. Graph readiness is checked once at startup; this reuse mode
+never ingests. The source checkout remains unchanged. Omit the memory options to
+chat without HydraDB, or use `--task` to send an initial message automatically.
+
+Commands: `/help`, `/paste` (multiline input ending with `.`), `/diff`, `/save`,
+`/status`, `/clear`, and `/exit` (also `/quit` or Ctrl-D). Ctrl-C during a model
+turn interrupts it, stops outstanding container commands, and preserves edits.
+Inspect `/diff` afterward because interrupted commands may have partially edited
+files. `/clear` resets conversation only, not edits, graph exclusions or usage.
+
+After every turn and on normal exit, the session directory contains `patch.diff`,
+`conversation.json`, `session.json`, `trajectory.jsonl`, and the usual manifests.
+Review/apply the exported patch yourself; nothing is applied to your checkout.
+Chat does not produce a SWE-bench prediction. Traces and patches may contain
+sensitive source; configured API keys are redacted from conversation/status
+output, but this is not a general secret scanner.
+
+`--max-total-tokens` covers the whole session; step and wall limits apply per turn.
+HydraDB's 40-query cap also covers the whole session. Interrupted in-flight model
+calls conservatively consume their reserved budget because billed usage may be
+unknown. A context-limit stop requires `/clear` and a fresh task description;
+automatic compaction is not implemented. Provider retries can extend wall time.
+
+This first version is line-oriented terminal chat with tool progress, not a
+full-screen UI or token-streaming renderer. Sessions cannot be resumed after
+exit, and abrupt process termination may lose the current turn's unsaved edits.
+The default Python image supports repository inspection but not this React
+project's frontend tests; those need a Node/dependency-equipped `--image`.
+
 ## Run a repair
 
 ### Local sandbox on this Mac
