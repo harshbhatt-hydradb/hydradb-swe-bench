@@ -4,6 +4,8 @@ Checked items are implemented and verified offline unless explicitly qualified. 
 
 ## 1. Establish the experiment and Azure harness
 
+- [x] **Improve terminal presentation and retrieval observability.** Add a responsive session card, Markdown answers, highlighted diffs, compact/expanded tool output, and `/graph`/`/tools`/`/last`. Report actual per-turn graph tool calls, HTTP query attempts, returned chunks, and errors separately from graph connection status. Persist metrics in session/trace artifacts. Tests cover terminal widths, escape/redaction handling, per-turn metric reset, and preserved sandbox behavior. This is a UI change, not enforced graph-first retrieval or a model-token optimization.
+
 - [x] **Add interactive sandbox chat.** `hydra-agent chat` keeps one container, model conversation, and memory provider across user turns. Show tool progress, support multiline messages and diff/save/status/clear/exit commands, export cumulative patches after turns, and clean up on exit. Reused graphs are attached once, not rebuilt for follow-ups. Session token accounting, interruption cleanup, protocol completion, and separate non-benchmark artifacts are included. Full-screen UI, streaming, automatic compaction, and session resume remain future work.
 
 - [x] **Write the design memo.** Define the research hypothesis, repository graph, retrieval policy, isolation boundaries, experimental controls, measurements, and failure modes in `design-memo.md`. Distinguish repository knowledge, attempt memory, and cross-session memory so results have a precise interpretation.

@@ -10,6 +10,7 @@ from hydra_agent import cli
 from hydra_agent.agent import Limits, Trace
 from hydra_agent.environment import Workspace
 from hydra_agent.interactive import chat_session, close_pending_tools, terminal_text
+from hydra_agent.memory import MemoryScope
 
 
 @pytest.fixture
@@ -184,3 +185,48 @@ def test_docker_interrupt_keeps_workspace(repo):
 
         assert workspace.run("python -c " + shlex.quote(probe), 5).exit_code == 0
         assert "return a - b" in workspace.run("cat calc.py", 5).output
+
+
+def test_chat_reports_per_turn_graph_usage(repo, tmp_path):
+    trace = Trace(tmp_path / "trace")
+
+    class Memory:
+        collection = "existing"
+        retrieval_only = True
+        search_calls = 0
+
+        def search(self, query, *, scope, limit):
+            self.search_calls += 1
+            trace.emit("hydradb_request", method="POST", path="/query", status=200)
+            return [{"path": "calc.py", "text": "source evidence"}]
+
+    model = ScriptedModel(
+        response("memory_search", {"query": "addition"}),
+        response("finish", {"summary": "Located addition"}),
+        response("finish", {"summary": "You are welcome"}),
+    )
+    messages = iter(["Find addition", "/graph", "Thanks", "/graph", "/tools", "/last", "/exit"])
+    display = []
+    with Workspace(repo, backend="local") as workspace:
+        chat_session(
+            model,
+            workspace,
+            Limits(),
+            trace,
+            tmp_path,
+            memory=Memory(),
+            scope=MemoryScope("repo", "commit", "task", "attempt"),
+            read_input=lambda prompt: next(messages),
+            write=display.append,
+        )
+    turns = json.loads((tmp_path / "session.json").read_text())["turns"]
+    assert turns[0]["graph_usage"] == {
+        "enabled": True,
+        "searches": 1,
+        "requests": 1,
+        "evidence_chunks": 1,
+        "errors": 0,
+    }
+    assert turns[1]["graph_usage"]["requests"] == 0
+    assert "Graph NOT queried this turn" in "\n".join(display)
+    assert "LOCAL SHELL" in "\n".join(display)

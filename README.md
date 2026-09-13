@@ -40,8 +40,21 @@ edits between turns. Graph readiness is checked once at startup; this reuse mode
 never ingests. The source checkout remains unchanged. Omit the memory options to
 chat without HydraDB, or use `--task` to send an initial message automatically.
 
+The terminal shows a session card with repository, commit, model, isolation mode,
+and graph connection. Answers render as Markdown, diffs have syntax highlighting,
+and tool output defaults to a five-line/600-character preview. `/tools` toggles
+expanded output; `/last` shows the last shell result within the harness output
+limit. These display settings do not trim model context or reduce token usage.
+
+Each turn reports usage, time, cumulative patch size, and graph activity. A graph
+connection is **not** proof of retrieval: the footer explicitly says when no query
+was made. `/graph` shows the collection and last turn's tool calls, HTTP query
+attempts (including retries), evidence chunks and errors. These metrics are saved
+in `session.json` and `chat_turn_summary` trace events. They do not prove that the
+server traversed particular graph edges or that returned evidence improved the answer.
+
 Commands: `/help`, `/paste` (multiline input ending with `.`), `/diff`, `/save`,
-`/status`, `/clear`, and `/exit` (also `/quit` or Ctrl-D). Ctrl-C during a model
+`/status`, `/graph`, `/tools`, `/last`, `/clear`, and `/exit` (also `/quit` or Ctrl-D). Ctrl-C during a model
 turn interrupts it, stops outstanding container commands, and preserves edits.
 Inspect `/diff` afterward because interrupted commands may have partially edited
 files. `/clear` resets conversation only, not edits, graph exclusions or usage.
@@ -59,7 +72,10 @@ calls conservatively consume their reserved budget because billed usage may be
 unknown. A context-limit stop requires `/clear` and a fresh task description;
 automatic compaction is not implemented. Provider retries can extend wall time.
 
-This first version is line-oriented terminal chat with tool progress, not a
+Preview the design without API calls or a container with
+`uv run python scripts/preview_chat.py` (all preview data is synthetic).
+
+This version is styled, line-oriented terminal chat, not a
 full-screen UI or token-streaming renderer. Sessions cannot be resumed after
 exit, and abrupt process termination may lose the current turn's unsaved edits.
 The default Python image supports repository inspection but not this React

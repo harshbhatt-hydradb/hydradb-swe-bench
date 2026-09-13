@@ -1,11 +1,11 @@
 """Line-oriented terminal chat with one sandbox and shared model history per session."""
 
 import json
-import re
 from dataclasses import replace
 from pathlib import Path
 
 from .agent import run_agent
+from .terminal import ChatTerminal, terminal_text  # noqa: F401 -- compatibility export
 
 HELP = """Commands:
   /help    Show this help
@@ -13,17 +13,13 @@ HELP = """Commands:
   /diff    Show the cumulative patch
   /save    Export patch and conversation to the session directory
   /status  Show session usage and sandbox information
+  /graph   Show the connected graph and last turn's retrieval usage
+  /tools   Toggle compact/expanded tool output
+  /last    Show the last shell output (within the harness output limit)
   /clear   Clear model conversation only; keep edits, memory exclusions and usage
   /exit    Save and close the sandbox (also /quit or Ctrl-D)
 Ctrl-C cancels the current turn; the sandbox and earlier edits remain.
 """
-
-
-def terminal_text(value: str) -> str:
-    # Treat model/source output as data, not terminal escape sequences (including OSC).
-    value = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", value)
-    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
-    return "".join(c for c in value if c in "\n\t" or (ord(c) >= 32 and ord(c) != 127))
 
 
 def close_pending_tools(messages: list[dict]) -> None:
@@ -72,15 +68,15 @@ def chat_session(
     turn_tokens = 0
     pending_tokens = 0
     previous_observer = trace.observer
+    ui = ChatTerminal(write=write, secrets=trace.secrets)
+    graph_usage = {}
+    active_tool = None
 
     def show(text):
-        for secret in trace.secrets:
-            if secret:
-                text = text.replace(secret, "[REDACTED]")
-        write(terminal_text(text))
+        ui.notice(text)
 
     def observe(event):
-        nonlocal turn_tokens, pending_tokens
+        nonlocal turn_tokens, pending_tokens, active_tool
         if event["event"] == "model_request":
             pending_tokens = event["reserved_tokens"]
         elif event["event"] == "model":
@@ -88,16 +84,20 @@ def chat_session(
             pending_tokens = 0
         if previous_observer:
             previous_observer(event)
+        if event["event"] == "hydradb_request" and event.get("path") == "/query":
+            graph_usage["requests"] += 1
         if event["event"] == "tool_start":
-            show(f"  {event['name']}: {next(iter(event['arguments'].values()))[:1000]}")
+            active_tool = event["name"]
+            if active_tool == "memory_search":
+                graph_usage["searches"] += 1
+            ui.activity(event["name"], next(iter(event["arguments"].values())))
         elif event["event"] == "tool":
             result = event["result"]
-            if "output" in result:
-                show(f"  exit={result.get('exit_code', '?')}\n{result['output'][:1600]}")
-            elif "hits" in result:
-                show(f"  Retrieved {len(result['hits'])} evidence chunks.")
-            elif "error" in result:
-                show(f"  Tool error: {result['error']}")
+            if active_tool == "memory_search":
+                graph_usage["evidence_chunks"] += len(result.get("hits", []))
+                graph_usage["errors"] += int("error" in result)
+            active_tool = None
+            ui.tool_result(result)
         elif event["event"] == "model":
             choices = event["response"].get("choices", [])
             if choices:
@@ -124,11 +124,7 @@ def chat_session(
         return len(patch.encode())
 
     trace.observer = observe
-    show("Hydra chat — one sandbox, continuous conversation. Type /help for commands.")
-    show(f"Sandbox: {workspace.container or workspace.path}\nArtifacts: {output}")
-    show(
-        "Edits stay in the sandbox; patches are saved after each turn. Your checkout is unchanged."
-    )
+    ui.header(workspace, model, memory, output)
     pending = initial_task
     try:
         while True:
@@ -141,13 +137,24 @@ def chat_session(
                 if task in {"/exit", "/quit"}:
                     break
                 if task == "/help":
-                    show(HELP)
+                    ui.panel("Session commands", HELP)
+                    continue
+                if task == "/graph":
+                    ui.graph(memory, turns[-1]["graph_usage"] if turns else None)
+                    continue
+                if task == "/tools":
+                    ui.expanded = not ui.expanded
+                    show("Tool output: " + ("expanded" if ui.expanded else "compact"))
+                    continue
+                if task == "/last":
+                    ui.panel("Last shell output", ui.last_output)
                     continue
                 if task == "/status":
-                    show(
+                    ui.panel(
+                        "Session status",
                         f"Turns: {len(turns)} | tokens: {total_tokens}/{limits.max_total_tokens} | "
                         f"context: {len(json.dumps(conversation).encode())} bytes | "
-                        f"memory searches: {getattr(memory, 'search_calls', 0)}/40"
+                        f"memory searches: {getattr(memory, 'search_calls', 0)}/40",
                     )
                     continue
                 if task == "/clear":
@@ -158,11 +165,10 @@ def chat_session(
                     continue
                 if task in {"/diff", "/save"}:
                     size = save()
-                    show(
-                        (output / "patch.diff").read_text() or "No changes."
-                        if task == "/diff"
-                        else f"Saved {size} patch bytes to {output / 'patch.diff'}"
-                    )
+                    if task == "/diff":
+                        ui.diff((output / "patch.diff").read_text())
+                    else:
+                        show(f"Saved {size} patch bytes to {output / 'patch.diff'}")
                     continue
                 if task == "/paste":
                     show("Enter message; end with a single . on its own line.")
@@ -183,8 +189,16 @@ def chat_session(
             if total_tokens >= limits.max_total_tokens:
                 show("Session token budget exhausted. Use /diff, /save or /exit.")
                 continue
-            show("Agent is working…")
+            ui.begin(len(turns) + 1)
             turn_tokens = pending_tokens = 0
+            graph_usage = {
+                "enabled": memory is not None,
+                "searches": 0,
+                "requests": 0,
+                "evidence_chunks": 0,
+                "errors": 0,
+            }
+            active_tool = None
             trace.emit("chat_turn", turn=len(turns) + 1)
             try:
                 result = run_agent(
@@ -207,17 +221,16 @@ def chat_session(
             finally:
                 close_pending_tools(conversation)
             total_tokens += result["total_tokens"]
+            result["graph_usage"] = dict(graph_usage)
+            trace.emit("chat_turn_summary", turn=len(turns) + 1, **result)
             safe_result = json.dumps(result)
             for secret in trace.secrets:
                 if secret:
                     safe_result = safe_result.replace(secret, "[REDACTED]")
             turns.append(json.loads(safe_result))
-            save()
-            show("\nAgent: " + (result["summary"] or f"Turn stopped: {result['status']}"))
-            show(
-                f"[{result['status']} · {result['total_tokens']} tokens · "
-                f"session {total_tokens}/{limits.max_total_tokens}]"
-            )
+            patch_bytes = save()
+            ui.answer(result["summary"] or f"Turn stopped: {result['status']}")
+            ui.footer(result, total_tokens, limits.max_total_tokens, patch_bytes)
             if result["status"] == "context_limit":
                 show(
                     "Context is full. Use /clear, then restate your next task; edits are retained."
