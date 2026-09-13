@@ -1,0 +1,30 @@
+#!/bin/bash
+# One-command benchmark entrypoint; SSD storage is automatic on this Mac.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+
+# Help needs neither an attached SSD nor a running Docker daemon.
+for arg in "$@"; do
+  if [[ "$arg" == --help || "$arg" == -h ]]; then
+    exec uv run --extra benchmark hydra-bench "$@"
+  fi
+done
+
+if [[ "$(uname -s)" == Darwin && "${HYDRA_BENCH_STORAGE:-ssd}" == ssd && "${HYDRA_BENCH_SSD_READY:-0}" != 1 ]]; then
+  export HYDRA_BENCH_SSD_READY=1
+  exec bash scripts/with_ssd.sh bash benchmark "$@"
+fi
+
+needs_docker=1
+for arg in "$@"; do
+  case "$arg" in
+    stop|report|--dry-run) needs_docker=0 ;;
+  esac
+done
+if [[ "${HYDRA_BENCH_SSD_READY:-0}" == 1 && "$needs_docker" == 1 ]]; then
+  if ! docker info >/dev/null 2>&1; then
+    echo "Starting benchmark Docker VM on the SSD…"
+    colima start --disk 160 --cpu 2 --memory 4.25 --mount none --activate=false
+  fi
+fi
+exec uv run --extra benchmark hydra-bench "$@"

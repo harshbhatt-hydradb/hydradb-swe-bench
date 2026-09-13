@@ -2,7 +2,63 @@
 
 An initial Azure OpenAI coding agent for controlled repository-memory experiments. Read [the design memo](design-memo.md) and [the detailed roadmap](todo.md).
 
-The agent inspects, edits, and tests a disposable snapshot of a Git commit, then exports a patch. HydraDB is enabled by default and must be queried before model inference on each task or chat turn. Use explicit `--memory none` for the no-memory benchmark control. Official SWE-bench execution is still planned; no benchmark score is claimed.
+The agent inspects, edits, and tests a disposable snapshot of a Git commit, then exports a patch. HydraDB is enabled by default and must be queried before model inference on each task or chat turn. Use explicit `--memory none` for the no-memory benchmark control. A SWE-bench pipeline is implemented below; live environment and official-grading validation are still pending. No benchmark score is claimed.
+
+## SWE-bench pipeline
+
+Run from this project directory:
+
+```bash
+./benchmark             # Start, or resume saved progress
+./benchmark --restart   # Stop the active run and resume
+./benchmark --fresh     # Archive previous results and start over
+./benchmark stop         # Stop cleanly
+./benchmark evaluate     # Resume grading saved predictions
+./benchmark report       # Show the saved results
+```
+
+No preparation command or campaign name is needed. The first run uses
+`sympy__sympy-20590`, both `baseline` and `hydradb`, native architecture, and your
+`.env`. Select tasks with `./benchmark --instances <id> <id>` or use
+`--arms baseline` / `--arms hydradb`. Later invocations remember those settings.
+
+On this Mac, the command selects the external SSD, redirects caches and results,
+and starts the dedicated Colima VM if needed. Results go to
+`/Volumes/PortableSSD/hydra-swe/runs/benchmark`. Keep the SSD attached while running.
+On Linux, use the current Docker daemon; results default to `runs/benchmark`.
+Set `HYDRA_BENCH_STORAGE=local` to use the current Docker setup on macOS, or use
+`uv run --extra benchmark hydra-bench` directly. `--output <directory>` overrides
+the results location.
+
+The command prepares tasks, builds environments, runs the agent, grades predictions,
+and writes `report.md`. Completed repairs are reused. Interrupted or failed attempts
+are archived and retried on the next invocation; incomplete grading is resumed.
+Code/model/task setting changes automatically create a new run and retain the old
+results. `--fresh` starts new inference; combine it with `--restart` if a run is active.
+Image work still needs sufficient disk and RAM (default 120 GiB free on the host
+and Docker VM). Running invokes the configured model and HydraDB services.
+
+See the [pipeline guide](docs/swe-bench-pipeline.md) for artifacts, recovery behavior,
+and evaluation boundaries, and the [technical report](technical_report.md) for the
+experiment. Saved run metadata still pins the dataset, model settings, and code;
+you do not need to manage it by hand.
+
+```mermaid
+flowchart LR
+    dataset["Pinned Verified dataset + explicit IDs"] --> split["Allowlist task fields"]
+    split --> safe["Issue + base commit + environment identifiers"]
+    dataset --> gold["Evaluator-only patches and test labels"]
+    safe --> image["Official dependency recipe + base source snapshot"]
+    image --> baseline["A: shell-only agent"]
+    image --> hydra["H: fresh HydraDB index → full-issue query → agent"]
+    baseline --> patches["Sealed per-attempt predictions"]
+    hydra --> patches
+    patches --> grader["Separate official SWE-bench evaluator"]
+    gold --> grader
+    grader --> report["Per-task grades, failures, assigned-task rates"]
+```
+
+The agent containers have no network, host mounts, credentials, or evaluator artifacts. Ordinary source tests at the base commit remain available. A/H measures the effect of the complete HydraDB integration, not graph structure in isolation.
 
 ## Agent architecture
 

@@ -6,6 +6,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -28,6 +29,7 @@ def execute(
     timeout: float = 60,
     limit: int = 16000,
     env: dict | None = None,
+    on_start: Callable[[int], None] | None = None,
 ) -> CommandResult:
     """Drain output continuously, retain bounded bytes, kill the process group on timeout."""
     start = time.monotonic()
@@ -45,6 +47,8 @@ def execute(
     ) as proc:
         assert proc.stdout is not None
         try:
+            if on_start is not None:
+                on_start(proc.pid)
             return _collect(proc, start, timeout, limit, output, total, timed_out)
         finally:
             try:
@@ -105,6 +109,8 @@ class Workspace:
         revision: str = "HEAD",
         backend: str = "docker",
         image: str = "hydra-agent-sandbox:local",
+        seed_from_image: bool = False,
+        container_name: str | None = None,
     ):
         self.repo = repo.resolve()
         if not self.repo.is_dir():
@@ -129,6 +135,8 @@ class Workspace:
             ) from None
         self.backend = backend
         self.image = image
+        self.seed_from_image = seed_from_image
+        self.container_name = container_name
         self.container: str | None = None
         self.temp: tempfile.TemporaryDirectory | None = None
         self.path: Path | None = None
@@ -163,7 +171,7 @@ class Workspace:
                 timeout=60,
             )
             if self.backend == "docker":
-                self.container = "hydra-agent-" + uuid.uuid4().hex
+                self.container = self.container_name or "hydra-agent-" + uuid.uuid4().hex
                 subprocess.run(
                     [
                         "docker",
@@ -192,6 +200,21 @@ class Workspace:
                     timeout=60,
                 )
                 with archive.open("rb") as source:
+                    if self.seed_from_image:
+                        subprocess.run(
+                            [
+                                "docker",
+                                "exec",
+                                self.container,
+                                "cp",
+                                "-a",
+                                "/opt/hydra-seed/.",
+                                "/workspace/",
+                            ],
+                            check=True,
+                            capture_output=True,
+                            timeout=120,
+                        )
                     subprocess.run(
                         [
                             "docker",

@@ -12,8 +12,12 @@ dependencies = ["openai>=1.99,<3", "python-dotenv>=1.0,<2", "httpx>=0.28,<1", "r
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
+[project.optional-dependencies]
+benchmark = ["swebench==3.0.15"]
+
 [project.scripts]
 hydra-agent = "hydra_agent.cli:main"
+hydra-bench = "hydra_agent.benchmark:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hydra_agent"]

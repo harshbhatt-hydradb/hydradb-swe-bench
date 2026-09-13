@@ -248,7 +248,9 @@ Do not publish API keys, private source, or raw traces without review. Pin provi
 | G6: experiment freeze | Exact IDs, configuration, retries, resource limits, sample size and analysis script approved before held-out inference |
 | G7: graph-specific study | All C/D graph-isolation gates pass and a separate held-out allocation/protocol is frozen |
 
-Existing work supplies the model/tool loop, sandbox, patch export, source indexing, explicit graph reuse and retrieval traces. Still required are the benchmark adapter, clean per-instance environments, official grading integration, campaign resumption, hard resource accounting, and statistical reporting. An attractive chat interface is not a substitute for these gates.
+Existing work supplies the model/tool loop, sandbox, patch export, source indexing, explicit graph reuse and retrieval traces. The initial `hydra-bench` implementation now adds a pinned task adapter, inference-image builder, serial paired runner, sealed prediction aggregation, separate official grading invocation, and per-task reporting. Offline tests cover the allowlisted worker/model path, required full-issue-first retrieval, no-memory control, integrity checks, timeouts, resumption, and official report parsing. See the [pipeline operations guide](docs/swe-bench-pipeline.md) for commands and limitations.
+
+This implementation does not close the live environment/evaluator gates. Representative source-test runs, positive/negative grader controls, and a genuine paired agent smoke remain required; current development-machine disk capacity blocks image work. Abrupt-crash reconciliation, bounded evaluator infrastructure retries, complete cost accounting, confidence intervals, repository-cluster sensitivity, and confirmatory analysis are also still open. The implementation records an operational assigned-task difference and exact McNemar test only after outcomes are accounted for; preliminary reports suppress the test. No benchmark score or graph-benefit result has been established.
 
 ## 13. Pre-launch checklist
 
