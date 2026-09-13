@@ -238,6 +238,11 @@ class HydraMemory:
                 "Could not verify workspace freshness; graph retrieval disabled"
             ) from None
 
+    def initial_search(self, query: str, *, scope: MemoryScope, limit: int) -> list[dict]:
+        if not any(source.path not in self.dirty_paths for source in self.sources.values()):
+            raise HydraError("No unchanged indexed sources remain for the mandatory query")
+        return self.search(query, scope=scope, limit=limit)
+
     def search(self, query: str, *, scope: MemoryScope, limit: int) -> list[dict]:
         if scope != self.corpus.scope:
             raise HydraError("Memory scope does not match the indexed repository attempt")
@@ -259,7 +264,7 @@ class HydraMemory:
                 "database": self.config.database,
                 "collections": [self.collection],
                 "ids": sorted(eligible),
-                "query": query[:4000],
+                "query": query,
                 "type": "knowledge",
                 "query_by": "hybrid",
                 "mode": "thinking",

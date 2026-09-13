@@ -380,3 +380,19 @@ def test_reuse_fails_closed_without_ingestion(corpus, state):
         assert [(r.method, r.url.path) for r in requests] == [("GET", "/context/status")]
     finally:
         memory.close()
+
+
+def test_query_text_is_not_keyword_extracted_or_truncated(corpus):
+    api = FakeHydraAPI()
+    memory = memory_for(corpus, api)
+    memory.ready = True
+    query = "Please explain the activation functions and their callers. " * 100
+    try:
+        memory.initial_search(query, scope=corpus.scope, limit=8)
+        assert json.loads(api.requests[-1].content)["query"] == query
+        memory.mark_changed({source.path for source in corpus.sources})
+        with pytest.raises(HydraError, match="No unchanged"):
+            memory.initial_search(query, scope=corpus.scope, limit=8)
+        assert len(api.requests) == 1
+    finally:
+        memory.close()

@@ -154,6 +154,8 @@ def test_chat_cli_does_not_require_task(repo, tmp_path, azure_env, monkeypatch):
         [
             "hydra-agent",
             "chat",
+            "--memory",
+            "none",
             "--repo",
             str(repo),
             "--backend",
@@ -222,11 +224,11 @@ def test_chat_reports_per_turn_graph_usage(repo, tmp_path):
     turns = json.loads((tmp_path / "session.json").read_text())["turns"]
     assert turns[0]["graph_usage"] == {
         "enabled": True,
-        "searches": 1,
-        "requests": 1,
-        "evidence_chunks": 1,
+        "searches": 2,
+        "requests": 2,
+        "evidence_chunks": 2,
         "errors": 0,
     }
-    assert turns[1]["graph_usage"]["requests"] == 0
-    assert "Graph NOT queried this turn" in "\n".join(display)
+    assert turns[1]["graph_usage"]["requests"] == 1
+    assert "Graph NOT queried this turn" not in "\n".join(display)
     assert "LOCAL SHELL" in "\n".join(display)

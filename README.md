@@ -2,7 +2,102 @@
 
 An initial Azure OpenAI coding agent for controlled repository-memory experiments. Read [the design memo](design-memo.md) and [the detailed roadmap](todo.md).
 
-The agent inspects, edits, and tests a disposable snapshot of a Git commit, then exports a patch. Optional HydraDB integration ingests that snapshot and gives the agent graph-aware retrieval. Official SWE-bench execution is still planned; no benchmark score is claimed.
+The agent inspects, edits, and tests a disposable snapshot of a Git commit, then exports a patch. HydraDB is enabled by default and must be queried before model inference on each task or chat turn. Use explicit `--memory none` for the no-memory benchmark control. Official SWE-bench execution is still planned; no benchmark score is claimed.
+
+## Agent architecture
+
+The host controller coordinates the model, memory, and execution. The model does
+not connect directly to HydraDB or the sandbox: it requests tools, and the
+controller executes them and returns their results.
+
+```mermaid
+flowchart TB
+    user["You: questions, tasks, follow-ups"]
+    repo["Local Git repository<br/>Selected committed snapshot; checkout unchanged"]
+    manifest["Saved index manifest<br/>For explicit graph reuse"]
+
+    subgraph host["Host machine: trusted controller"]
+        ui["Terminal UI / CLI<br/>chat or single-task run"]
+        loop["Agent loop<br/>Conversation history, tool dispatch, budgets"]
+        snapshot["Snapshot preparation<br/>Git archive + source manifest"]
+        memory["HydraDB adapter<br/>Readiness, source scoping, stale-file exclusion"]
+        evidence["Bounded evidence<br/>Paths, hashes, source text<br/>Up to 8 chunks; 1,400 bytes of text each"]
+        keys["Local credentials<br/>Azure and HydraDB API keys"]
+        artifacts["Local run artifacts<br/>Trace, manifests, cumulative patch<br/>Chat: conversation + session usage"]
+    end
+
+    azure["Azure-hosted model<br/>Configured deployment: grok-4.3"]
+    hydra["HydraDB hosted service<br/>Repository content graph + retrieval"]
+
+    subgraph vm["Docker engine / Colima VM on this Mac"]
+        sandbox["Disposable non-root container<br/>Read, search, edit, test<br/>No network, host mounts, or controller keys"]
+    end
+
+    user -->|"message"| ui
+    ui --> loop
+    loop -->|"answer + tool progress"| ui
+    repo --> snapshot
+    snapshot -->|"copy committed files; no host mount"| sandbox
+    snapshot -.->|"eligible corpus: default HydraDB setup"| memory
+    manifest -.->|"reuse: validate commit, hashes and source IDs"| memory
+    keys -.->|"model API authentication"| loop
+    keys -.->|"memory API authentication"| memory
+
+    loop -->|"instructions + history + tool results"| azure
+    azure -->|"tool calls or answer"| loop
+    loop -->|"shell tool"| sandbox
+    sandbox -->|"bounded output + exit status"| loop
+    loop -->|"required full-message query first; follow-up memory_search"| memory
+    sandbox -->|"changed paths before retrieval"| memory
+    memory <-->|"setup/status checks; scoped query"| hydra
+    memory -->|"filter returned chunks"| evidence
+    evidence -->|"memory_search result added to history"| loop
+    loop -->|"record activity and usage"| artifacts
+    sandbox -->|"controller exports patch"| artifacts
+```
+
+### Setup and memory modes
+
+| Mode | Startup behavior | During conversation |
+| --- | --- | --- |
+| `--memory none` | Create sandbox; no HydraDB setup | Model uses sandbox tools without graph retrieval |
+| `--memory hydradb` | Upload eligible snapshot files to a new collection; wait for completed indexing | Scoped retrieval from that collection |
+| `--memory hydradb --reuse-index PATH` | Validate the saved manifest against the snapshot; check existing source readiness; **no uploads or database creation** | Scoped retrieval from the existing collection |
+
+HydraDB currently builds an **automatic content graph**, not a deterministic
+parser-derived call graph. The adapter requests graph-aware hybrid retrieval and
+returns filtered primary/related chunks; it does not expose raw graph paths to
+the model. Uploaded data stays in HydraDB after the local sandbox closes.
+
+### What happens on each turn
+
+1. Your message is appended to the conversation. With HydraDB enabled (the
+   default), the controller first queries it with your complete question/task,
+   without keyword extraction or silent query truncation. This occurs before
+   any model call or model-directed shell action. Internal snapshot/freshness
+   checks still precede retrieval. Evidence is recorded as a controller-origin
+   tool exchange and included in the first model request.
+2. The model chooses an answer or a tool call. `memory_search` queries HydraDB;
+   `shell` reads/searches/edits/tests inside the container. Tool results are
+   appended to history and sent back on the next model call.
+3. After retrieval, the model may answer, read specific files, or search again.
+   **Initial retrieval is enforced; subsequent shell verification is not.**
+   Follow-up searches are instructed to use complete questions or sentences,
+   not keyword lists. The UI reports query activity separately from connection status.
+4. A finish call or ordinary answer returns control to you in chat. Follow-ups
+   retain the same conversation, container, edits, and memory provider; graph
+   setup does not repeat each turn. Previously retrieved snippets remain in
+   history and can become stale, even though edited files are excluded from new
+   retrievals.
+5. Chat saves its cumulative patch and conversation after each turn. Exiting
+   saves artifacts and removes the container; nothing is automatically applied
+   to your checkout. Saved sessions are not yet resumable.
+
+Token usage accumulates across model calls, including repeated history and tool
+results. HydraDB's internal model/embedding usage is not included in the displayed
+Azure-model token total. Single-task `run` also exports `prediction.jsonl`; chat
+does not generate a benchmark prediction, and official SWE-bench grading remains
+outside the implemented system.
 
 ## Setup
 
@@ -37,8 +132,16 @@ uv run hydra-agent chat \
 At `You ›`, ask a question or request a change, then send follow-ups. The model
 receives earlier messages and tool results, and the same container retains file
 edits between turns. Graph readiness is checked once at startup; this reuse mode
-never ingests. The source checkout remains unchanged. Omit the memory options to
-chat without HydraDB, or use `--task` to send an initial message automatically.
+never ingests. The source checkout remains unchanged. Use explicit `--memory none`
+for the control condition, or `--task` to send an initial message automatically.
+
+The full message is queried before every model turn, including short follow-ups.
+HydraDB performs query interpretation; the controller does not generate keywords.
+An initial retrieval failure stops the turn with `memory_error`; no silent
+shell-only fallback occurs. A successful query with zero hits can proceed to
+local investigation. The 40-query cap includes these mandatory queries. If all
+indexed files have changed, the turn stops rather than broadening the query to
+stale sources. Reusing a collection still performs no ingestion.
 
 The terminal shows a session card with repository, commit, model, isolation mode,
 and graph connection. Answers render as Markdown, diffs have syntax highlighting,
@@ -182,7 +285,7 @@ Source coverage is explicit: the policy includes common source/text extensions a
 
 The default indexing deadline is 900 seconds (`--index-timeout`), separate from agent execution time. Retrieval is capped at 40 searches and 8 evidence chunks per call. API requests have bounded retries for rate-limit/server errors; no hard dollar budget includes HydraDB's internal model usage. Client-side tests verify request scoping and output filtering, not the server's internal graph isolation. Use a dedicated benchmark database and verify isolation live before scoring.
 
-Unless `--reuse-index` is supplied (see below), each run uses a fresh collection, re-ingests the snapshot, and incurs cold-indexing cost. Uploaded data, including partially indexed runs, remains in HydraDB until you remove it; the collection is recorded in the index manifest. Automatic snapshot caching, automatic retention, explicit parser-derived edges, and edit overlays remain on the roadmap. `--memory none` (the default) keeps the original baseline without uploads.
+Unless `--reuse-index` is supplied (see below), each HydraDB run uses a fresh collection, re-ingests the snapshot, and incurs cold-indexing cost. Uploaded data, including partially indexed runs, remains in HydraDB until you remove it; the collection is recorded in the index manifest. Automatic snapshot caching, automatic retention, explicit parser-derived edges, and edit overlays remain on the roadmap. Explicit `--memory none` selects the benchmark baseline without uploads; HydraDB is the default.
 
 The adapter follows the [HydraDB v2 OpenAPI contract](https://docs.hydradb.com/api-reference/v2/openapi.json) and [integration guide](https://docs.hydradb.com/llms.txt), using `API-Version: 2`. Some cookbook examples use older payload shapes; the implementation uses the current multipart contract.
 

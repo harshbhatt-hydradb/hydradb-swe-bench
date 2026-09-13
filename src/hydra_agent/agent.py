@@ -1,5 +1,6 @@
 import json
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
@@ -105,18 +106,26 @@ def run_agent(
         tools.append(
             function(
                 "memory_search",
-                "Retrieve scoped source evidence from memory.",
-                {"query": {"type": "string"}},
+                "Retrieve source evidence using a complete natural-language question or sentence, never a keyword list. HydraDB handles keyword extraction internally.",
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "A complete question or descriptive sentence. Preserve the information need; do not reduce it to keywords.",
+                    }
+                },
             )
         )
     prompt = SYSTEM_PROMPT
     if memory is not None:
         prompt += """
-Use memory_search for initial repository discovery and locating related code. It searches the
+The controller queries HydraDB with the user's full message before your first model call on
+every turn. Use that evidence for initial repository discovery and locating related code.
+For additional memory_search calls, send a complete natural-language question or sentence.
+Do not extract keywords or send keyword lists; HydraDB does that internally. It searches the
 indexed BASE COMMIT through HydraDB. Read the current files with shell before editing; execute
 tests with shell. Changed files are excluded from subsequent graph retrieval, and earlier
 retrieved snippets may now be stale. Use workspace search for changed/new files and when
-retrieval is empty or fails. Graph relationships are inferred evidence, not verified execution.
+retrieval is empty. Graph relationships are inferred evidence, not verified execution.
 """
     if conversation is not None:
         prompt += """
@@ -135,6 +144,73 @@ in your response when needed. Do not assume every message requests a bug fix.
     steps = 0
     status = "step_limit"
     summary = ""
+    if memory is not None:
+        # Controller-enforced retrieval, not an optional model decision. Retain the full task.
+        call_id = "call_initial_" + uuid.uuid4().hex
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "memory_search",
+                            "arguments": json.dumps({"query": task}),
+                        },
+                    }
+                ],
+            }
+        )
+        trace.emit(
+            "tool_start",
+            step=0,
+            name="memory_search",
+            arguments={"query": task},
+            origin="controller",
+            required=True,
+        )
+        failed = False
+        try:
+            refresh = getattr(memory, "refresh", None)
+            if refresh is not None:
+                refresh(workspace)
+            initial_search = getattr(memory, "initial_search", memory.search)
+            initial = {"hits": initial_search(task, scope=scope, limit=8)}
+        except Exception as exc:  # noqa: BLE001 -- fail closed without exposing API details
+            failed = True
+            initial = {
+                "error": type(exc).__name__,
+                "message": "Mandatory HydraDB query failed; no model or agent shell actions were started.",
+            }
+        content = json.dumps(initial, ensure_ascii=False)
+        if len(content.encode()) > 24000:
+            content = json.dumps(
+                {
+                    "truncated": True,
+                    "output": content.encode()[:16000].decode("utf-8", errors="replace"),
+                }
+            )
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+        trace.emit(
+            "tool",
+            step=0,
+            tool_call_id=call_id,
+            result=json.loads(content),
+            origin="controller",
+            required=True,
+        )
+        if failed:
+            result = {
+                "status": "memory_error",
+                "summary": initial["message"],
+                "steps": 0,
+                "total_tokens": 0,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            }
+            trace.emit("end", **result)
+            return result
     for step in range(1, limits.max_steps + 1):
         remaining_time = limits.wall_seconds - (time.monotonic() - started)
         if remaining_time <= 0:

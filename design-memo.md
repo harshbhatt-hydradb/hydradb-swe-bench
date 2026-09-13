@@ -64,6 +64,14 @@ Build an immutable base graph for each commit. Edits create an attempt-local ove
 
 ## Retrieval and memory policy
 
+Implementation update: normal CLI runs now default to HydraDB and enforce
+`required_full_task_first_v1`: the controller queries the full user message
+before model inference on each turn, without keyword extraction or query
+truncation. Follow-up searches are instructed to use complete natural-language
+questions. Initial failures stop the turn; `--memory none` is an explicit
+benchmark control. See [technical_report.md](technical_report.md) version 0.2
+for the revised H treatment; historical optional-use results are separate.
+
 Begin with lexical and exact symbol matching. Add embeddings over the same source chunks, then graph expansion from the same candidate seeds. A proposed first graph policy expands one hop through imports, references, definitions, and test associations, with per-edge-type and total-node limits. Tune limits on development instances only.
 
 The selector returns compact evidence packets containing source text, path, span, commit/blob hash, retrieval score, and the relationship path explaining why each item was selected. Deduplicate overlaps and cap the combined context in tokens. Treat every packet as evidence to verify against source. Prefer targeted retrieval after an unsuccessful search or new test failure over blindly injecting a large graph summary at every turn.

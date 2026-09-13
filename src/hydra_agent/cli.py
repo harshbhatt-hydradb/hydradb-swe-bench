@@ -45,8 +45,8 @@ def main() -> int:
     run.add_argument(
         "--memory",
         choices=("none", "hydradb"),
-        default="none",
-        help="hydradb uploads the selected commit and enables scoped graph retrieval",
+        default="hydradb",
+        help="hydradb (default) requires retrieval before each turn; none is the explicit no-memory benchmark control",
     )
     run.add_argument("--index-timeout", type=int, default=900)
     run.add_argument(
@@ -120,6 +120,7 @@ def main() -> int:
             "backend": args.backend,
             "image": args.image if args.backend == "docker" else None,
             "memory": args.memory,
+            "retrieval_policy": "required_full_task_first_v1" if hydra_config else "none",
             "limits": asdict(limits),
             "sdk_max_retries": 2,
             "action": args.action,

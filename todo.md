@@ -29,6 +29,8 @@ Checked items are implemented and verified offline unless explicitly qualified. 
 
 ## 3. Connect HydraDB and index repository snapshots
 
+- [x] **Enforce full-message-first HydraDB retrieval.** Default `run` and `chat` to HydraDB; query the entire task/question before model inference on each turn, record controller-origin evidence, and stop on initial retrieval failure. Preserve explicit `--memory none` for the control arm. Follow-up search instructions require natural-language questions instead of keyword lists. Remove silent query truncation. Freeze the policy as `required_full_task_first_v1` in run metadata and technical report v0.2.
+
 - [x] **Add an explicit retrieval-only run pipeline.** `--reuse-index` validates a completed local manifest against the repository commit and source hashes, retains its original source IDs, and checks remote readiness without database creation or ingestion. Queries and stale-file exclusion use that existing collection; every agent attempt still has separate artifacts. A standalone `scripts/query_existing_graph.py` supports direct retrieval without a coding model. This is manual reuse, not automatic snapshot caching or incremental indexing.
 
 - [x] **Implement hosted HydraDB v2 ingestion and retrieval.** Add `--memory hydradb`, credentials in the controller, a corpus manifest from the execution snapshot, multipart batched ingestion, infrastructure/graph readiness checks, and scoped `thinking` queries. Preserve the no-memory baseline. Acceptance: HTTP-transport tests and a simulated CLI repair verify uploads occur before inference, partial failures stop setup, and returned evidence is restricted to the attempt's source IDs.

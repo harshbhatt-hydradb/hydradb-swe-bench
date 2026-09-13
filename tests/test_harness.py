@@ -180,6 +180,9 @@ def test_step_limit_and_key_redaction(tmp_path):
 
 @pytest.fixture
 def azure_env(monkeypatch):
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("HYDRA_DB_API_KEY", "")
+    monkeypatch.setenv("HYDRA_DB_DATABASE", "")
     for key in list(os.environ):
         if key.startswith("AZURE_OPENAI_"):
             monkeypatch.delenv(key)
@@ -252,6 +255,8 @@ def test_cli_artifacts(repo, tmp_path, azure_env, monkeypatch):
             str(repo),
             "--task",
             "Add a file",
+            "--memory",
+            "none",
             "--backend",
             "local",
             "--allow-local-shell",
@@ -310,6 +315,8 @@ def test_cli_reports_invalid_repository(
             revision,
             "--task",
             "Fix",
+            "--memory",
+            "none",
             "--backend",
             "local",
             "--allow-local-shell",
@@ -395,7 +402,7 @@ def test_memory_search_receives_explicit_scope(tmp_path):
     result = run_agent(
         model, None, "task", Limits(), Trace(tmp_path / "trace.jsonl"), memory=Memory(), scope=scope
     )
-    assert observed == [("add", scope, 8)]
+    assert observed == [("task", scope, 8), ("add", scope, 8)]
     assert result["status"] == "submitted"
     assert json.loads(model.requests[1][-1]["content"])["hits"][0]["path"] == "calc.py"
 
@@ -408,6 +415,8 @@ def test_cli_records_inference_failure(repo, tmp_path, azure_env, monkeypatch):
         [
             "hydra-agent",
             "run",
+            "--memory",
+            "none",
             "--repo",
             str(repo),
             "--task",
@@ -492,8 +501,8 @@ def test_hydra_cli_indexes_before_model_and_invalidates_edits(
     assert memories[0].dirty_paths == {"calc.py"}
     events = [json.loads(line) for line in (attempt / "trajectory.jsonl").read_text().splitlines()]
     tool_results = [e["result"] for e in events if e["event"] == "tool"]
-    assert tool_results[0]["hits"][0]["path"] == "calc.py"
-    assert tool_results[2]["hits"] == []
+    assert tool_results[1]["hits"][0]["path"] == "calc.py"
+    assert tool_results[3]["hits"] == []
     assert "+def add(a, b): return a + b" in (attempt / "patch.diff").read_text()
     assert "return a - b" in (repo / "calc.py").read_text()
 
@@ -557,8 +566,6 @@ def test_cli_reuses_graph_without_ingesting(repo, tmp_path, azure_env, monkeypat
             "--backend",
             "local",
             "--allow-local-shell",
-            "--memory",
-            "hydradb",
             "--reuse-index",
             str(saved),
             "--output",
@@ -568,6 +575,7 @@ def test_cli_reuses_graph_without_ingesting(repo, tmp_path, azure_env, monkeypat
     assert cli.main() == 0
     assert [(r.method, r.url.path) for r in api.requests] == [
         ("GET", "/context/status"),
+        ("POST", "/query"),
         ("POST", "/query"),
     ]
     (attempt,) = output.iterdir()
@@ -579,3 +587,46 @@ def test_cli_reuses_graph_without_ingesting(repo, tmp_path, azure_env, monkeypat
     assert manifest["hydradb"]["retrieval_only"] is True
     assert manifest["hydradb"]["collection"] == "attempt_attempt"
     assert manifest["attempt_id"] != old_scope.attempt_id
+    assert manifest["retrieval_policy"] == "required_full_task_first_v1"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_required_full_question_precedes_model_and_shell(tmp_path, fail):
+    events = []
+    question = "Which activation functions are used in the hidden and output layers?"
+
+    class Memory:
+        def search(self, query, **kwargs):
+            events.append(("query", query))
+            if fail:
+                raise RuntimeError("private detail")
+            return []
+
+    class Model:
+        def complete(self, messages, tools, **kwargs):
+            events.append(("model", None))
+            assert messages[-1]["role"] == "tool"
+            assert (
+                json.loads(messages[-2]["tool_calls"][0]["function"]["arguments"])["query"]
+                == question
+            )
+            return response("finish", {"summary": "Done"})
+
+    result = run_agent(
+        Model(),
+        None,
+        question,
+        Limits(),
+        Trace(tmp_path / "trace"),
+        memory=Memory(),
+        scope=MemoryScope("repo", "commit", "task", "attempt"),
+    )
+    assert events[0] == ("query", question)
+    if fail:
+        assert len(events) == 1
+        assert result["status"] == "memory_error"
+        assert result["total_tokens"] == 0
+        assert "private detail" not in (tmp_path / "trace").read_text()
+    else:
+        assert events[1][0] == "model"
+        assert result["status"] == "submitted"  # empty evidence is not an API failure

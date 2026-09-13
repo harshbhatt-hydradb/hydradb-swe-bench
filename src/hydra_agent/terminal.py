@@ -72,7 +72,9 @@ class ChatTerminal:
             ),
             (
                 "Memory",
-                "HydraDB connected · queries optional" if memory else "Off · workspace only",
+                "HydraDB · required full-message query first"
+                if memory
+                else "Off · explicit baseline",
             ),
         ]
         if memory:
@@ -185,9 +187,7 @@ class ChatTerminal:
             return
         text = f"Collection: {getattr(memory, 'collection', 'configured collection')}\n"
         text += f"Session queries: {getattr(memory, 'search_calls', 0)}/40\n"
-        text += (
-            "Retrieval is available, not enforced. A connected graph does not mean it was queried."
-        )
+        text += "Each turn must query HydraDB with your full message before model inference. Follow-up searches use natural-language sentences."
         if usage:
             text += f"\nLast turn: {usage['searches']} tool calls · {usage['requests']} HTTP query attempts · {usage['evidence_chunks']} chunks · {usage['errors']} errors"
         self.panel("HydraDB memory", text)
