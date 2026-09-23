@@ -2,6 +2,11 @@
 
 An initial Azure OpenAI coding agent for controlled repository-memory experiments. Read [the design memo](design-memo.md) and [the detailed roadmap](todo.md).
 
+For repository documentation, `./codewiki-benchmark` runs the CodeWikiBench pipeline:
+pinned code snapshot → HydraDB ingestion/retrieval → read-only wiki agent → rubric evaluation.
+It defaults to a Chart.js pilot and resumes saved progress. See the
+[CodeWikiBench guide](docs/codewikibench-pipeline.md) for full-suite runs, limits, and scoring.
+
 The agent inspects, edits, and tests a disposable snapshot of a Git commit, then exports a patch. HydraDB is enabled by default and must be queried before model inference on each task or chat turn. Use explicit `--memory none` for the no-memory benchmark control. A SWE-bench pipeline is implemented below; live environment and official-grading validation are still pending. No benchmark score is claimed.
 
 ## SWE-bench pipeline

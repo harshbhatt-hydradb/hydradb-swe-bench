@@ -1,0 +1,11 @@
+{
+  "repositories": [
+    {
+      "repo": "Chart.js",
+      "score": null,
+      "status": "interrupted"
+    }
+  ],
+  "completed": 0,
+  "assigned": 1
+}

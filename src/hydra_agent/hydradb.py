@@ -196,7 +196,8 @@ class HydraMemory:
         """Read-only readiness check; never create, upload, or repair missing remote data."""
         self.ready = False
         started = time.monotonic()
-        ids = sorted(self.sources)
+        # Sources excluded from retrieval (dirty/skipped) need not be present remotely.
+        ids = sorted(sid for sid, s in self.sources.items() if s.path not in self.dirty_paths)
         if not ids:
             raise HydraError("Cannot reuse an empty source allowlist")
         for offset in range(0, len(ids), 20):

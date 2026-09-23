@@ -12,7 +12,7 @@ class AzureModel:
     def complete(
         self, messages: list[dict], tools: list[dict], *, max_tokens: int, timeout: float
     ) -> dict:
-        extra = {}
+        extra = {self.config.token_param: max_tokens}
         if tools:
             extra["tools"] = tools
         if self.config.reasoning_effort:
@@ -20,7 +20,6 @@ class AzureModel:
         result = self.client.chat.completions.create(
             model=self.config.deployment,
             messages=messages,
-            max_completion_tokens=max_tokens,
             timeout=timeout,
             **extra,
         )

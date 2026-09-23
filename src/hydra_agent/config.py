@@ -9,6 +9,8 @@ class AzureConfig:
     deployment: str
     api_key: str = field(repr=False)
     reasoning_effort: str | None = None
+    # OpenAI-native deployments take max_completion_tokens; OpenRouter takes max_tokens.
+    token_param: str = "max_completion_tokens"
 
     @classmethod
     def from_env(cls) -> "AzureConfig":
@@ -37,6 +39,22 @@ class AzureConfig:
             values[names[2]],
             os.environ.get("AZURE_OPENAI_REASONING_EFFORT") or None,
         )
+
+
+def openrouter_config(model: str, reasoning_effort: str | None = None) -> AzureConfig:
+    """Build an OpenAI-compatible config for an OpenRouter judge (e.g. anthropic/claude-opus-5)."""
+    api_key = os.environ.get("OPEN_ROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("Missing configuration: OPEN_ROUTER_API_KEY")
+    if not model.strip():
+        raise ValueError("OpenRouter judge requires a model id, e.g. anthropic/claude-opus-5")
+    return AzureConfig(
+        endpoint="https://openrouter.ai/api/v1/",
+        deployment=model.strip(),
+        api_key=api_key,
+        reasoning_effort=reasoning_effort,
+        token_param="max_tokens",
+    )
 
 
 @dataclass(frozen=True)

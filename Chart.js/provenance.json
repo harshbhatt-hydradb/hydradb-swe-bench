@@ -1,0 +1,11 @@
+{
+  "dataset": "anhnh2002/codewikibench",
+  "dataset_revision": "6d215eb7d50a164e370a9a5703b813f9da345965",
+  "record_digest": "c5cf35650dc03f58747237e0615d131d8ea9778f16520c1530f7ccbd7803eee1",
+  "metadata": {
+    "repo_name": "Chart.js",
+    "repo_url": "https://github.com/chartjs/Chart.js",
+    "commit_id": "6372280085625b43ef34d7b70f3e86b063d22a10"
+  },
+  "snapshot_sha256": "819d2347099dfba611c917193649d9a021933134fe123fe8808f6b1cc33a30b9"
+}

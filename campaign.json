@@ -1,0 +1,9 @@
+{
+  "dataset": "anhnh2002/codewikibench",
+  "dataset_revision": "6d215eb7d50a164e370a9a5703b813f9da345965",
+  "evaluator_revision": "5e728fb40492effb54d59041f908dbf9079fe238",
+  "repos": [
+    "Chart.js"
+  ],
+  "corpus_policy": "source_build_tests_no_docs_or_fixtures_v1"
+}
