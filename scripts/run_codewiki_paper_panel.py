@@ -14,10 +14,12 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import runpy
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,7 @@ def parse_args(argv=None):
         help="Validate an existing wiki and panel without model calls",
     )
     parser.add_argument("--panel-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--campaign-lock-fd", type=int, help=argparse.SUPPRESS)
     argv = sys.argv[1:] if argv is None else argv
     forbidden = {
         "--judge-provider",
@@ -70,13 +73,17 @@ def parse_args(argv=None):
     ):
         parser.error("Choose one CodeWikiBench repository; stages are run or evaluate")
     args.output, args.protocol_run = args.output.resolve(), args.protocol_run.resolve()
+    if args.campaign_lock_fd is not None and (
+        args.campaign_lock_fd < 0 or args.stage != "evaluate"
+    ):
+        parser.error("An inherited campaign lock requires evaluate and a nonnegative descriptor")
     if args.output == args.protocol_run or args.protocol_run in args.output.parents:
         parser.error("Use a separate output directory to preserve the protocol run")
     return args
 
 
 def generation_args(args):
-    skip = {"stage", "protocol_run", "check_panel", "panel_worker"}
+    skip = {"stage", "protocol_run", "check_panel", "panel_worker", "campaign_lock_fd"}
     flags = []
     for name, value in vars(args).items():
         if name in skip or "judge" in name or value is None:
@@ -388,6 +395,36 @@ def panel_worker(args, runner, protocol):
     return 0 if result["status"] == "completed" else 1
 
 
+@contextmanager
+def campaign_lock(root, inherited_fd=None):
+    """Share the controller's open-file lock, or acquire one for a standalone panel."""
+    path = root / ".lock"
+    try:
+        if inherited_fd is None:
+            lock = path.open("a")
+        else:
+            actual, expected = os.fstat(inherited_fd), path.stat()
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                raise SystemExit("Inherited campaign lock does not match this --output directory")
+            lock = os.fdopen(os.dup(inherited_fd), "a")
+    except OSError:
+        raise SystemExit(
+            "Campaign lock could not be opened or inherited; restart evaluation"
+        ) from None
+    with lock:
+        try:
+            # Duplicated/inherited descriptors share an open-file description and
+            # therefore the same flock. Independent evaluators still cannot enter.
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(
+                "This CodeWikiBench run is already active; wait for it to finish or stop it "
+                "before resuming evaluation. Keep the .lock file in place."
+            ) from None
+        yield
+        # Close only this descriptor; LOCK_UN would also unlock the controller's lock.
+
+
 def main(argv=None):
     args = parse_args(argv)
     runner = runpy.run_path(str(args.protocol_run / "runner.py"))
@@ -396,8 +433,7 @@ def main(argv=None):
         raise ValueError("Protocol does not use the expected three judge models")
     if args.panel_worker:
         args.output.mkdir(parents=True, exist_ok=True)
-        with (args.output / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with campaign_lock(args.output, args.campaign_lock_fd):
             return panel_worker(args, runner, protocol)
     if args.stage == "run" and not args.check_panel:
         for stage in ("prepare", "index", "generate"):
@@ -423,7 +459,11 @@ def main(argv=None):
         *forwarded,
         "--panel-worker",
     ]
-    return subprocess.run(command, check=False).returncode
+    return subprocess.run(
+        command,
+        check=False,
+        pass_fds=() if args.campaign_lock_fd is None else (args.campaign_lock_fd,),
+    ).returncode
 
 
 if __name__ == "__main__":

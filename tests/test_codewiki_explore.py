@@ -92,7 +92,12 @@ class FixtureAgent(DocumentationAgent):
             )
         if not label.startswith("explore:"):
             assert "repository survey" in task
-            return "# Architecture\n" + "The modules cooperate through the run function. " * 15
+            return (
+                "# Architecture\n"
+                + "The modules cooperate through the run function. " * 15
+                + f"[source]({self.corpus.scope.repository}/blob/"
+                f"{self.corpus.scope.base_commit}/src/a.py#L1-L3)"
+            )
         path = label.removeprefix("explore:")
         path = None if path == "repository" else path
         value = discovery(path, self.targets[path])
@@ -173,7 +178,7 @@ def test_generation_consumes_notes_and_reuses_explored_modules(graph, tmp_path):
     metadata = {"repo_name": "fixture", "commit_id": graph.scope.base_commit}
     state = generate(agent, root, metadata, identity={}, exploration_config=ExplorationConfig())
     assert state["status"] == "completed" and state["exploration"]["status"] == "completed"
-    assert agent.calls == ["explore:repository", "outline", "overview"]
+    assert agent.calls == ["explore:repository", "outline", "overview", "review:overview"]
     calls = list(agent.calls)
     generate(agent, root, metadata, identity={}, exploration_config=ExplorationConfig())
     assert agent.calls == calls
@@ -280,7 +285,7 @@ def test_generate_cli_wires_exploration_and_search_accounting(graph, tmp_path, m
     monkeypatch.setattr(
         codewiki,
         "open_index",
-        lambda *args: SimpleNamespace(
+        lambda *args, workers: SimpleNamespace(
             search_calls=0,
             configure_search=lambda path, **kw: configured.append((path, kw)),
             close=lambda: None,
@@ -579,7 +584,9 @@ def test_real_agent_explores_retrieves_notes_and_writes_wiki(graph, tmp_path):
                     )
                 )
             return completion(
-                "# Module interactions\n" + "Modules a and b both import run from c. " * 15
+                "# Module interactions\n"
+                + "Modules a and b both import run from c. " * 15
+                + f"[source]({graph.scope.repository}/blob/{graph.scope.base_commit}/src/a.py#L1-L3)"
             )
 
     memory = memory_for(graph, handler)
@@ -601,8 +608,8 @@ def test_real_agent_explores_retrieves_notes_and_writes_wiki(graph, tmp_path):
     assert (
         state["status"] == "completed" and state["exploration"]["coverage"]["topics_explored"] == 2
     )
-    assert len(queries) == 3
-    assert len(notes_delivered) == 2 and all(len(n["notes"]) == 1 for n in notes_delivered)
+    assert len(queries) == 4
+    assert len(notes_delivered) == 3 and all(len(n["notes"]) == 1 for n in notes_delivered)
     calls = len(queries)
     generate(
         agent,

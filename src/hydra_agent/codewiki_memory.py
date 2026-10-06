@@ -3,7 +3,7 @@
 import json
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Lock
 
 from .bench_data import atomic_json, digest, read_json
@@ -11,6 +11,77 @@ from .hydradb import HydraError, HydraMemory
 from .indexing import Corpus
 
 STALL_WARNING_SECONDS = 300
+DEFAULT_INDEX_WORKERS = 8
+MAX_INDEX_WORKERS = 16
+
+
+def _validate_workers(workers):
+    if type(workers) is not int or not 1 <= workers <= MAX_INDEX_WORKERS:
+        raise ValueError(f"Index workers must be between 1 and {MAX_INDEX_WORKERS}")
+
+
+def _serialized_report(report):
+    lock = Lock()
+
+    def emit(kind, **data):
+        if report:
+            with lock:
+                report(kind, **data)
+
+    return emit
+
+
+def _run_batches(items, request, accept, *, workers, before=None):
+    """Keep a bounded pool busy; accept/checkpoint results on the calling thread."""
+    _validate_workers(workers)
+    if not items:
+        return
+    batches = iter(items[i : i + 20] for i in range(0, len(items), 20))
+    pending = set()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def fill():
+            group = []
+            for _ in range(workers - len(pending)):
+                batch = next(batches, None)
+                if batch is None:
+                    break
+                group.append(batch)
+            if group and before:
+                # Persist reservations before sending any of these uploads.
+                before(group)
+            for batch in group:
+                pending.add(pool.submit(request, batch))
+
+        error = None
+        try:
+            fill()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                # Process every already-finished result before dispatching more work,
+                # so an observed failure stops dispatch even alongside successes.
+                done.update(future for future in pending if future.done())
+                for future in done:
+                    pending.remove(future)
+                    try:
+                        accept(future.result())
+                    except BaseException as exc:  # noqa: BLE001 -- drain work before propagating
+                        if error is None:
+                            error = exc
+                if error is not None:
+                    break
+                fill()
+        except BaseException as exc:  # noqa: BLE001 -- retain acknowledgments on Ctrl-C too
+            error = exc
+        if error is not None:
+            # Failed requests or Ctrl-C must not discard other upload acknowledgments.
+            # No further requests are submitted; only the bounded in-flight set drains.
+            for future in pending:
+                try:
+                    accept(future.result())
+                except Exception as exc:  # noqa: BLE001 -- preserve the first error after draining
+                    error.add_note(f"Another in-flight batch failed: {type(exc).__name__}")
+            raise error
 
 
 class IndexRetryExhausted(HydraError):
@@ -19,6 +90,50 @@ class IndexRetryExhausted(HydraError):
 
 class CodeWikiMemory(HydraMemory):
     """Preserve source filters while respecting the hosted API's 200-ID query limit."""
+
+    def source_status(self, ids, *, deadline):
+        params = [("database", self.config.database), ("collection", self.collection)]
+        params.extend(("ids", sid) for sid in ids)
+        data = self._request("GET", "/context/status", params=params, deadline=deadline)
+        found = {}
+        for item in data.get("statuses", []):
+            sid = item.get("id")
+            if sid not in ids or sid in found:
+                raise HydraError("Unexpected or duplicate indexing status ID")
+            found[sid] = item
+        if set(found) != set(ids):
+            raise HydraError("Incomplete indexing status response; refusing to assume readiness")
+        return found
+
+    def verify_index(self, *, workers=DEFAULT_INDEX_WORKERS, timeout=300):
+        """Verify every eligible source with read-only, parallel status requests."""
+        self.ready = False
+        _validate_workers(workers)
+        if timeout <= 0:
+            raise ValueError("Indexing timeout must be positive")
+        ids = sorted(
+            sid for sid, source in self.sources.items() if source.path not in self.dirty_paths
+        )
+        if not ids:
+            raise HydraError("Cannot reuse an empty source allowlist")
+        deadline = time.monotonic() + timeout
+        checked = 0
+
+        def request(batch):
+            statuses = self.source_status(batch, deadline=deadline)
+            if any(s.get("indexing_status") != "completed" for s in statuses.values()):
+                raise HydraError("Existing graph has incomplete sources; no ingestion attempted")
+            return len(statuses)
+
+        def accept(count):
+            nonlocal checked
+            checked += count
+            self.report("codewiki_index_verified", checked=checked, total=len(ids))
+
+        self.report("codewiki_verify_workers", workers=workers, sources=len(ids))
+        _run_batches(ids, request, accept, workers=workers)
+        self.ready = True
+        self.report("hydradb_reused", collection=self.collection, source_count=len(ids))
 
     def configure_search(self, path, *, max_queries=120):
         """Persist logical query reservations and successful exact-query results."""
@@ -114,27 +229,20 @@ def index_corpus(
     manifest_path,
     *,
     timeout=1200,
-    workers=4,
+    workers=DEFAULT_INDEX_WORKERS,
     max_attempts=2,
     max_failures=0,
     report=None,
     client=None,
 ):
-    if not 1 <= workers <= 8:
-        raise ValueError("Index workers must be between 1 and 8")
+    _validate_workers(workers)
     if max_attempts < 1:
         raise ValueError("Index upload attempts must be positive")
     if max_failures < 0:
         raise ValueError("Index max failures cannot be negative")
-    # HTTP requests can run concurrently; serialize trace writes and terminal callbacks.
-    report_lock = Lock()
-
-    def serialized_report(kind, **data):
-        if report:
-            with report_lock:
-                report(kind, **data)
-
-    memory = CodeWikiMemory(config, corpus, report=serialized_report, client=client, poll_seconds=5)
+    memory = CodeWikiMemory(
+        config, corpus, report=_serialized_report(report), client=client, poll_seconds=5
+    )
     expected = {**corpus.manifest(), "database": config.database, "collection": memory.collection}
     manifest = (
         read_json(manifest_path)
@@ -158,47 +266,27 @@ def index_corpus(
     def save():
         atomic_json(manifest_path, manifest)
 
-    def batches(items, request, accept, *, before=None):
-        # At most `workers` batches are submitted at once. Checkpoints are owned by
-        # this thread; workers only perform HTTP calls and validate response IDs.
-        if not items:
-            return
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for offset in range(0, len(items), workers * 20):
-                group = [
-                    items[i : i + 20]
-                    for i in range(offset, min(offset + workers * 20, len(items)), 20)
-                ]
-                if before:
-                    before(group)
-                futures = [pool.submit(request, batch) for batch in group]
-                error = None
-                for future in as_completed(futures):
-                    try:
-                        accept(future.result())
-                    except Exception as exc:  # noqa: BLE001 -- retain other acknowledged batches
-                        if error is None:
-                            error = exc
-                if error is not None:
-                    raise error
-
     def status_batch(batch):
-        params = [("database", config.database), ("collection", memory.collection)]
-        params += [("ids", sid) for sid in batch]
-        data = memory._request("GET", "/context/status", params=params, deadline=deadline)
-        found = {}
-        for item in data.get("statuses", []):
-            sid = item.get("id")
-            if sid not in batch or sid in found:
-                raise HydraError("Unexpected or duplicate indexing status ID")
-            found[sid] = item
-        if set(found) != set(batch):
-            raise HydraError("Incomplete indexing status response; refusing to assume readiness")
-        return found
+        return memory.source_status(batch, deadline=deadline)
 
-    def refresh(ids):
+    def refresh(ids, *, revalidate=False):
+        checked = completed = 0
+
+        def accept_status(found):
+            nonlocal checked, completed
+            statuses.update(found)
+            if revalidate:
+                checked += len(found)
+                completed += sum(s.get("indexing_status") == "completed" for s in found.values())
+                memory.report(
+                    "codewiki_index_revalidated",
+                    checked=checked,
+                    total=len(ids),
+                    completed=completed,
+                )
+
         try:
-            batches(ids, status_batch, statuses.update)
+            _run_batches(ids, status_batch, accept_status, workers=workers)
         finally:
             # One checkpoint per scan, including partial results on failure, instead
             # of rewriting the entire corpus manifest after every 20-source response.
@@ -283,7 +371,7 @@ def index_corpus(
         previous = [s.id for s in corpus.sources if attempts.get(s.id, 0)]
         if previous:
             memory.report("codewiki_index_resume", sources=len(previous))
-        refresh(previous)
+        refresh(previous, revalidate=True)
         acknowledged.update(statuses)
         last_completed = sum(s.get("indexing_status") == "completed" for s in statuses.values())
         last_progress = last_warning = time.monotonic()
@@ -331,7 +419,9 @@ def index_corpus(
             retries = sum(bool(attempts.get(source.id)) for source in upload)
             if retries:
                 memory.report("codewiki_retry", sources=retries)
-            batches(upload, upload_batch, accept_upload, before=reserve_uploads)
+            _run_batches(
+                upload, upload_batch, accept_upload, workers=workers, before=reserve_uploads
+            )
             refresh([s.id for s in pending])
             complete = sum(s.get("indexing_status") == "completed" for s in statuses.values())
             now = time.monotonic()
@@ -373,7 +463,16 @@ def index_corpus(
         raise
 
 
-def open_index(config, corpus: Corpus, manifest_path, report=None):
+def open_index(
+    config,
+    corpus: Corpus,
+    manifest_path,
+    report=None,
+    *,
+    workers=DEFAULT_INDEX_WORKERS,
+    client=None,
+):
+    _validate_workers(workers)
     saved = read_json(manifest_path)
     if saved.get("status") != "completed" or saved.get("sources") != corpus.manifest()["sources"]:
         raise ValueError("Index is incomplete or sources changed; run index first")
@@ -382,11 +481,17 @@ def open_index(config, corpus: Corpus, manifest_path, report=None):
         or saved["collection"] != "attempt_" + corpus.scope.attempt_id
     ):
         raise ValueError("Index database/collection mismatch")
-    memory = CodeWikiMemory(config, corpus, existing_collection=saved["collection"], report=report)
+    memory = CodeWikiMemory(
+        config,
+        corpus,
+        existing_collection=saved["collection"],
+        report=_serialized_report(report),
+        client=client,
+    )
     # Skipped sources are not present remotely; exclude them from retrieval and readiness checks.
     memory.dirty_paths.update(entry["path"] for entry in saved.get("skipped", {}).values())
     try:
-        memory.prepare(timeout=300)
+        memory.verify_index(workers=workers, timeout=300)
     except BaseException:
         memory.close()
         raise

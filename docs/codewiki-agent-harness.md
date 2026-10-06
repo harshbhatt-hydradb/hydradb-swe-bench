@@ -17,8 +17,8 @@ flowchart TB
     end
 
     subgraph GENERATE["2. Exploration and documentation agent"]
-        PLAN["Survey repository → plan outline → write pages"]
-        TOOLS["Tools<br/>memory_search · list_files · read_file · module_notes"]
+        PLAN["Survey repository → plan outline → draft and review pages"]
+        TOOLS["Tools<br/>memory_search · list_files · search_source · read_file · module_notes"]
         LLM["Generator LLM<br/>Reason over retrieved evidence"]
         NOTES[("Survey note<br/>Named modules, evidence, open questions")]
         WIKI["Saved outline and wiki pages<br/>Markdown, citations, diagrams"]
@@ -67,10 +67,18 @@ flowchart TB
     class VALID guard
 ```
 
-- The generator surveys the repository once, then plans the outline and writes each page.
+- The generator surveys the repository once, plans the outline, then drafts and reviews each page.
   Each session starts with HydraDB retrieval. The survey names up to six modules for later
   reading; it does not walk those modules in separate sessions. A run writes six pages,
-  with ten model steps per session. Token use is recorded and does not stop the run.
+  with twenty model steps per session. Token use is recorded and does not stop the run.
+- Planning inspects repository documentation indexes as well as public source declarations.
+  Each page gets a separate review session that checks its draft against source, tests and
+  repository docs for missing APIs, defaults, examples and integration details. Drafts are
+  checkpointed before review; interrupted reviews resume without rewriting completed drafts.
+  Page responses allow up to 10,000 output tokens. This adds model calls and output capacity.
+- `search_source` finds literal text within the same source allowlist, with line numbers,
+  bounded snippets and pagination. Search results locate evidence; `read_file` remains the
+  evidence check for survey citations. CMake, MSBuild and PowerShell build files are included.
 - Survey edges are inferred from inspected code, not a verified call graph. The saved
   note is a reading list for the outline and page sessions.
 - Exact-query results are cached. Search calls are counted and are not capped.
@@ -84,8 +92,9 @@ flowchart TB
   repeated-content reuse.
 - An unsuccessful judge read must be corrected before scoring. Exhausted retries
   remain unscored and block a complete overall score; they are never ordinary zeros.
-- Source-link checks validate paths and line ranges. They do not verify every claim
-  or render Mermaid diagrams.
+- Source-link checks require commit-specific citations and reject invalid paths or line ranges
+  before accepting a draft or reviewed page. Corrections use the session's remaining steps.
+  These checks do not verify every claim or render Mermaid diagrams.
 
 Implementation: [controller](../src/hydra_agent/codewiki.py),
 [generator](../src/hydra_agent/codewiki_agent.py),

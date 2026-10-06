@@ -1,6 +1,6 @@
 # SWE-bench pipeline: implementation and operations
 
-This is a serial operational pipeline for Experiment I in [technical_report.md](../technical_report.md), not a completed evaluation. It compares A (`baseline`, no memory) and H (`hydradb`, mandatory full-issue retrieval). Azure deployment, issue, tool-loop limits, and per-task inference image are shared. H incurs additional cold-ingestion and retrieval work; this is part of the treatment, not free compute.
+This is a serial operational pipeline for Experiment I in [swe-bench-protocol.md](swe-bench-protocol.md), not a completed evaluation. It compares A (`baseline`, no memory) and H (`hydradb`, mandatory full-issue retrieval). Azure deployment, issue, tool-loop limits, and per-task inference image are shared. H incurs additional cold-ingestion and retrieval work; this is part of the treatment, not free compute.
 
 ## Current validation boundary
 

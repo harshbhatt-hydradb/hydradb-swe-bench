@@ -1,5 +1,9 @@
+import fcntl
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -219,3 +223,100 @@ def test_wrapper_does_not_judge_when_generation_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(panel.subprocess, "run", run)
     assert panel.main(["--output", str(tmp_path)]) == 1
     assert len(commands) == 3
+
+
+def test_panel_inherits_campaign_lock_across_processes_without_unlocking_parent(tmp_path):
+    script = """
+import runpy, sys
+from pathlib import Path
+panel = runpy.run_path(sys.argv[1])
+with panel['campaign_lock'](Path(sys.argv[2]), int(sys.argv[3])):
+    print('shared campaign lock')
+"""
+    path = tmp_path / ".lock"
+    with path.open("a") as parent:
+        fcntl.flock(parent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            [sys.executable, "-c", script, panel.__file__, str(tmp_path), str(parent.fileno())],
+            pass_fds=(parent.fileno(),),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "shared campaign lock" in result.stdout
+        # Closing the worker's duplicate must leave the controller protected.
+        with path.open("a") as competitor, pytest.raises(BlockingIOError):
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # A remaining lock file does not block a subsequent invocation.
+    with panel.campaign_lock(tmp_path):
+        pass
+
+
+def test_panel_refuses_unrelated_inherited_descriptor(tmp_path):
+    (tmp_path / ".lock").touch()
+    with (
+        (tmp_path / "wrong.lock").open("a") as wrong,
+        pytest.raises(SystemExit, match="does not match"),
+        panel.campaign_lock(tmp_path, wrong.fileno()),
+    ):
+        pytest.fail("must not enter with a different lock")
+    with (
+        pytest.raises(SystemExit, match="could not be opened or inherited"),
+        panel.campaign_lock(tmp_path, 999999),
+    ):
+        pytest.fail("must not enter with a closed descriptor")
+
+
+def test_standalone_panel_refuses_active_campaign_and_releases_its_own_lock(tmp_path, monkeypatch):
+    protocol = {"models": [{"openrouter_id": name} for name in panel.MODEL_IDS]}
+    monkeypatch.setattr(panel.runpy, "run_path", lambda path: {"verify": lambda: protocol})
+    entered = []
+
+    def worker(*args):
+        entered.append(True)
+        with (tmp_path / ".lock").open("a") as competitor, pytest.raises(BlockingIOError):
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return 0
+
+    monkeypatch.setattr(panel, "panel_worker", worker)
+    args = ["evaluate", "--output", str(tmp_path), "--panel-worker"]
+    with (tmp_path / ".lock").open("a") as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(SystemExit, match="already active"):
+            panel.main(args)
+    assert not entered
+    assert panel.main(args) == 0 and entered == [True]
+    with panel.campaign_lock(tmp_path):
+        pass
+
+
+def test_wrapper_forwards_inherited_lock_to_pinned_environment(tmp_path, monkeypatch):
+    protocol = {"models": [{"openrouter_id": name} for name in panel.MODEL_IDS]}
+    monkeypatch.setattr(panel.runpy, "run_path", lambda path: {"verify": lambda: protocol})
+    calls = []
+    with (tmp_path / ".lock").open("a") as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def run(command, **kwargs):
+            calls.append(command)
+            descriptor = int(command[command.index("--campaign-lock-fd") + 1])
+            assert kwargs["pass_fds"] == (descriptor,) == (owner.fileno(),)
+            assert os.fstat(descriptor).st_ino == (tmp_path / ".lock").stat().st_ino
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(panel.subprocess, "run", run)
+        assert (
+            panel.main(
+                ["evaluate", "--output", str(tmp_path), "--campaign-lock-fd", str(owner.fileno())]
+            )
+            == 0
+        )
+    assert len(calls) == 1 and calls[0][-1] == "--panel-worker"
+
+
+@pytest.mark.parametrize("stage,fd", [("run", "3"), ("evaluate", "-1")])
+def test_inherited_lock_option_is_internal_to_evaluation(stage, fd):
+    with pytest.raises(SystemExit):
+        panel.parse_args([stage, "--campaign-lock-fd", fd])

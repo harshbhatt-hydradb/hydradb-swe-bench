@@ -44,20 +44,35 @@ flowchart LR
    and uploads eligible files into a unique collection. Each source ID is tied to the
    repository, commit, run, path, and content hash. The manifest records accepted attempts
    and source status. By default, failed sources receive at most one automatic retry; completed
-   sources are not uploaded again. Uploads and status checks use up to four concurrent
-   requests in batches of 20 sources; configure this with `--index-workers 1-8`.
+   sources are not uploaded again. Uploads and status checks default to eight concurrent
+   requests in batches of 20 sources; configure this with `--index-workers 1-16`.
+   A rolling pool immediately fills available slots instead of waiting for the slowest
+   request in each group. On failure or interruption, dispatch stops and acknowledgments
+   from in-flight requests are retained before the stage exits. Upload attempts are reserved
+   only for batches being dispatched, and the existing per-source attempt limit still applies.
+   Read-only status requests retry transient transport errors (including timeouts) up to
+   twice with 1s/2s backoff, within the indexing deadline. Upload transport errors are not
+   automatically retried: resume first checks whether HydraDB accepted the source.
    Checkpoints and trace callbacks are serialized. Status scans checkpoint once per scan
    (including partial results on failure), instead of rewriting the entire manifest after
-   each batch. All sources must report `completed` before generation.
+   each batch. All sources must report `completed` before generation. The final read-only
+   verification uses the same worker count and reports progress; missing, duplicate, foreign
+   or incomplete source statuses prevent generation.
 3. **Generate** runs one repository survey through HydraDB retrieval, then
-   plans up to six wiki pages and writes each through a bounded tool loop. The survey
+   plans up to six wiki pages and drafts and reviews each through bounded tool loops. The survey
    records candidate modules, evidence and unresolved questions. It does not schedule
    those modules as further sessions. Every survey, planning and writing session starts
-   with an enforced HydraDB query. Available tools are `memory_search`, paginated
-   `list_files`, source-line `read_file`, saved `module_notes`, and `finish`.
+   with an enforced HydraDB query. Each page also receives a separate review session to check
+   feature coverage against allowed sources and repository documentation. Available tools are
+   `memory_search`, paginated `list_files`, literal `search_source`, source-line `read_file`,
+   saved `module_notes`, and `finish`. Review retrieval uses a complete scope question; the
+   draft itself is provided to the model without being copied into the retrieval query.
    Files are served from an in-memory allowlist, not arbitrary paths. Retrieved graph
    context is evidence, not a verified call graph. Pages include commit-specific source
-   citations and Mermaid diagrams where useful.
+   citations and Mermaid diagrams where useful. Drafts are saved before review, and only the
+   accepted final pages are exported for evaluation. Missing or invalid source citations receive
+   correction feedback within the remaining session steps. Both writing and review responses
+   permit up to 10,000 output tokens; reviews add model calls to the previous writing-only flow.
 4. **Evaluate** loads the published prompt and pure leaf-collection/hierarchical-scoring
    functions from CodeWikiBench commit `5e728fb40492effb54d59041f908dbf9079fe238`.
    Each leaf is judged independently with a `docs_navigator` tool over generated pages.
@@ -81,6 +96,7 @@ Stages can also be invoked individually:
 ./codewiki-benchmark generate
 ./codewiki-benchmark evaluate
 ./codewiki-benchmark index --index-workers 4
+./codewiki-benchmark --repos svelte --output runs/codewiki-svelte --index-workers 16
 ```
 
 Terminal output shows elapsed time, repository/stage boundaries, indexed-source progress,
@@ -94,6 +110,12 @@ new completed source, a warning lists up to five remaining paths and their state
 the warning repeats every five minutes until progress resumes. Concurrency reduces
 HTTP and local checkpoint overhead; it does not configure HydraDB's processing workers
 or fix queued/failed graph jobs. Repositories are still orchestrated sequentially.
+Start with the default eight workers; compare sixteen if request throughput remains the
+bottleneck. Higher concurrency can increase server throttling and timeouts. Worker count
+can change when resuming the same corpus without resetting uploads; it is recorded in
+`run.json` and the request traces. Already-running processes need a restart to use changes.
+Resume shows how many sources have been revalidated and how many of those are ready;
+transport retries show the endpoint, error type and delay.
 
 Redirecting output automatically disables animation and colors. Use `--plain` to force this
 format in a terminal, for example `./codewiki-benchmark --plain | tee codewiki.log`.
@@ -104,18 +126,26 @@ updates, generation's existing code fingerprint check may require a new output d
 if an outline or completed pages were produced by an earlier version.
 
 The same commands resume existing artifacts. A process lock prevents two pipeline instances
-from writing the same campaign. Reuse validates the source hashes and remote source readiness.
+from writing the same campaign. The controller passes its held lock descriptor through the
+panel launcher and pinned judge environment, so its own judge worker shares the lock. A
+standalone panel acquires the same campaign lock itself; an independent active run receives
+a clear busy message. Lock files remain on disk after exit and should not be deleted to bypass
+an active process. Reuse validates the source hashes and remote source readiness.
+To resume a failed paper evaluation without regenerating the wiki, use
+`./codewiki-benchmark evaluate --repos svelte --output YOUR_RUN --plain`.
+The paper panel fixes its three judge models and protocol limits; single-judge budget flags
+do not apply to this evaluator.
 To resume only one repository in an existing campaign, pass its name with `--repos`, for
 example `./codewiki-benchmark --output runs/codewiki-gpt6-claude --repos svelte`.
 The saved campaign membership and reports retain all repositories; omitted repositories
 are not executed. Adding repositories to an existing campaign still requires a new output
 directory. Keep the same generation and judge model flags when resuming generated artifacts.
 Upload-attempt counts also survive resumes. If a source exhausts the default two attempts,
-rerunning the same command will recheck its status but will not upload it again. To explicitly
-allow a third upload for failed/missing sources, add `--index-max-attempts 3` to the command.
-This is a total per-source limit, not three new retries on every invocation. Completed and
-still-processing sources are not re-uploaded. An additional attempt may still encounter the
-same HydraDB processing error; a larger `--index-timeout` does not reset the attempt limit.
+rerunning the same command will recheck its status but will not upload it again. The CLI fixes
+the total limit at two attempts per source and the indexing deadline at 24 hours. Completed
+and still-processing sources are not re-uploaded. The Python indexing API accepts a larger
+`max_attempts` for an explicit repair, but additional uploads may encounter the same HydraDB
+processing error. Increasing the indexing deadline does not reset the attempt limit.
 Generation settings/code and evaluation input/model changes require a new output directory;
 completed pages or judgments cannot silently be mixed between settings. A stopped stage
 retains its artifacts and returns nonzero. No remote data is automatically deleted.
@@ -184,15 +214,17 @@ are saved separately at `<repo>/evaluation-paper-panel/report.md` and `result.js
 
 ## Inputs and limits
 
-The fixed input policy excludes existing prose/reference documentation, documentation/site
-directories, `.github`, fixture/snapshot data, dependency lockfiles, binary/unsupported files,
-secret filenames and vendored/generated directories. It includes source comments, build
-configuration, type declarations, and eligible test code. Every excluded path has a reason
-in `inference/corpus.json`. This is a code-focused documentation experiment; it does not
-give the generator the reference documentation used to construct benchmark rubrics.
+The fixed input policy keeps repository source, tests, build files, and repository
+documentation such as `docs/` and Markdown. Build inputs include CMake modules/templates,
+.NET project/solution files, MSBuild properties/targets, PowerShell scripts and resource files.
+These extra formats apply to CodeWiki generation; the SWE-bench input policy is unchanged.
+It excludes `.github`, `.env` and other
+secret filenames, fixture/snapshot data, dependency lockfiles, binary/unsupported files,
+oversized files, and vendored/generated directories. Every excluded path has a reason
+in `inference/corpus.json`. Benchmark rubrics are still withheld from the generator.
 
-A run surveys the repository once, writes six pages, and allows ten model steps per
-session. Generation records token use and does not stop for a token, context, or search
+A run surveys the repository once, drafts and reviews up to six pages, and allows twenty model
+steps per session. Generation records token use and does not stop for a token, context, or search
 cap. Indexing waits up to 24 hours. Evaluation always uses the three paper judges, four
 workers per model. Each invocation makes real billed model and HydraDB requests.
 
@@ -215,7 +247,9 @@ Each judgment records its adapter version; `evaluation/result.json` reports vers
 counts so resumed runs with both adapter versions are identifiable. Errors remain
 unscored, with local failure reasons saved in judgment files, traces and terminal logs.
 
-Resume rejects a different model, source, or generator code once an outline or page exists.
+Resume rejects a different model, source, generator code, page limit or review setting once an
+outline or draft exists. Saved outlines, drafts and final pages are checked for changes.
+The expanded input policy and draft/review flow require a new output directory for old runs.
 HydraDB accepts at most 200 source IDs per HTTP query. Larger corpora use multiple
 requests per logical query with the same question and disjoint source allowlists;
 results are merged by returned score. This is a client merge, not a global rerank.
@@ -279,6 +313,7 @@ Chart.js/
   generation-events.jsonl, generation-usage.json
   retrieval-cache.json
   wiki/outline.json, generation.json, README.md
+  wiki/drafts/*.md
   wiki/exploration/state.json, README.md
   wiki/pages/*.md, docs_tree.json, structured_docs.json
   evaluation/reference.json, rubrics.json

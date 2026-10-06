@@ -1,4 +1,6 @@
+import fcntl
 import io
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +43,11 @@ def test_evaluate_uses_the_paper_judges(tmp_path, monkeypatch, capsys):
 
     def run(command, **kwargs):
         commands.append(command)
+        descriptor = int(command[command.index("--campaign-lock-fd") + 1])
+        assert kwargs["pass_fds"] == (descriptor,)
+        assert os.fstat(descriptor).st_ino == (tmp_path / ".lock").stat().st_ino
+        with (tmp_path / ".lock").open("a") as competitor, pytest.raises(BlockingIOError):
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(codewiki.subprocess, "run", run)
@@ -51,6 +58,20 @@ def test_evaluate_uses_the_paper_judges(tmp_path, monkeypatch, capsys):
     assert "evaluate" in commands[0] and "svelte" in commands[0]
     text = capsys.readouterr().out
     assert "Gemini 2.5 Flash" in text and "50.000/100" in text
+
+
+def test_paper_panel_failure_gives_evaluate_only_resume_guidance(tmp_path, monkeypatch, capsys):
+    atomic_json(tmp_path / "svelte/inference/task.json", {})
+    monkeypatch.setattr(codewiki, "get_corpus", lambda *args: None)
+    monkeypatch.setattr(codewiki, "load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setattr(codewiki, "run_paper_judges", lambda *a, **kw: 1)
+    assert (
+        codewiki.main(["evaluate", "--repos", "svelte", "--output", str(tmp_path), "--plain"]) == 1
+    )
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Resume with the evaluate stage" in text
+    assert "paper panel fixes its judge models" in text
+    assert "--max-judge-tokens" not in text and "same --output, --repos and judge flags" not in text
 
 
 def test_redirected_progress_is_readable_throttled_and_sanitized():
@@ -76,6 +97,87 @@ def test_redirected_progress_is_readable_throttled_and_sanitized():
     assert "secret-key" not in text and "\x1b" not in text and "\r" not in text
     assert "DONE in 00:30" in text
     assert not terminal.live.live.is_started
+
+
+def test_resume_shows_checked_sources_separately_from_ready_sources_and_read_retries():
+    stream = io.StringIO()
+    terminal = CodeWikiTerminal(console=Console(file=stream, width=160), clock=lambda: 0)
+    terminal.start_stage("svelte", "index", 2, 4)
+    terminal.emit("codewiki_index_resume", sources=100)
+    for _ in range(30):
+        terminal.emit("codewiki_index_revalidated", checked=20, total=100, completed=18)
+    terminal.emit(
+        "hydradb_transport_error",
+        method="GET",
+        path="/context/status",
+        error_type="ReadTimeout",
+        retry=0,
+        retrying=True,
+        delay_seconds=1,
+    )
+    terminal.emit("codewiki_index_revalidated", checked=100, total=100, completed=98)
+    terminal.emit("codewiki_indexing", completed=98, total=100)
+    terminal.failed_stage("stop fixture")
+    text = stream.getvalue()
+    assert "Revalidating 100 previously uploaded sources" in text
+    assert text.count("Sources revalidated") == 2
+    assert "Sources revalidated · 98 ready" in text and "100/100 (100%)" in text
+    assert "HydraDB GET /context/status · ReadTimeout · retry 1/2 in 1s" in text
+    assert "Sources indexed" in text and "98/100 (98.0%)" in text
+    assert not terminal.live.live.is_started
+
+
+def test_final_verification_shows_parallel_workers_and_progress():
+    stream = io.StringIO()
+    terminal = CodeWikiTerminal(console=Console(file=stream, width=160), clock=lambda: 0)
+    terminal.start_stage("svelte", "generate", 3, 4)
+    terminal.emit("codewiki_verify_workers", workers=8, sources=100)
+    terminal.emit("codewiki_index_verified", checked=20, total=100)
+    terminal.emit("codewiki_index_verified", checked=100, total=100)
+    terminal.emit("hydradb_reused", source_count=100)
+    terminal.complete_stage()
+    text = stream.getvalue()
+    assert "Verifying 100 sources · 8 concurrent requests" in text
+    assert "Sources verified · 100/100 (100%)" in text
+    assert "Existing index verified · 100 sources" in text
+
+
+@pytest.mark.parametrize("stage", ["index", "generate"])
+@pytest.mark.parametrize("workers", [None, 16])
+def test_cli_passes_worker_count_to_indexing_and_verification(
+    tmp_path, monkeypatch, stage, workers
+):
+    from hydra_agent.hydradb import HydraError
+
+    atomic_json(tmp_path / "svelte/inference/task.json", {})
+    monkeypatch.setattr(codewiki, "load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setattr(codewiki, "get_corpus", lambda *a: SimpleNamespace())
+    monkeypatch.setattr(codewiki.HydraConfig, "from_env", lambda: SimpleNamespace(api_key="key"))
+    monkeypatch.setattr(
+        codewiki.AzureConfig,
+        "from_env",
+        lambda: SimpleNamespace(api_key="key", deployment="fixture"),
+    )
+    seen = []
+
+    def check(*args, **kwargs):
+        seen.append(kwargs["workers"])
+        raise HydraError("stop after checking CLI configuration")
+
+    monkeypatch.setattr(codewiki, "index_corpus" if stage == "index" else "open_index", check)
+    args = [stage, "--repos", "svelte", "--output", str(tmp_path), "--plain"]
+    if workers is not None:
+        args += ["--index-workers", str(workers)]
+    assert codewiki.main(args) == 1
+    assert seen == [workers if workers is not None else 8]
+    assert read_json(tmp_path / "svelte/run.json")["index_workers"] == seen[0]
+
+
+@pytest.mark.parametrize("workers", ["0", "17", "-1"])
+def test_cli_rejects_worker_count_outside_supported_range(workers):
+    with pytest.raises(SystemExit) as exc:
+        codewiki.parser().parse_args(["--index-workers", workers])
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("width", [40, 80, 120])

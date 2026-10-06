@@ -1,4 +1,4 @@
-"""Pinned CodeWikiBench data and code-only documentation inputs."""
+"""Pinned CodeWikiBench data and allowlisted repository documentation inputs."""
 
 import ast
 import hashlib
@@ -41,9 +41,26 @@ REPOSITORIES = (
     "wazuh",
     "x64dbg",
 )
-POLICY = "source_build_tests_no_docs_or_fixtures_v1"
-DOC_PARTS = {"docs", "doc", "documentation", "wiki", "website", "site", ".github"}
-PROSE = {".md", ".mdx", ".rst", ".txt"}
+POLICY = "source_build_tests_with_repo_docs_v3"
+# Keep these additions specific to documentation generation. The SWE-bench
+# execution/index-reuse policy continues to use build_corpus's default formats.
+BUILD_TEXT_EXTENSIONS = frozenset(
+    {
+        ".cmake",
+        ".in",
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".props",
+        ".targets",
+        ".sln",
+        ".slnx",
+        ".ps1",
+        ".psm1",
+        ".psd1",
+        ".resx",
+    }
+)
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -139,13 +156,13 @@ def prepare_record(root: Path, name: str, cache: Path) -> dict:
 
 
 def code_corpus(archive: Path, scope: MemoryScope, max_bytes: int = 50_000_000) -> Corpus:
-    corpus = build_corpus(archive, scope, max_total_bytes=max_bytes)
+    corpus = build_corpus(
+        archive, scope, max_total_bytes=max_bytes, extra_text_extensions=BUILD_TEXT_EXTENSIONS
+    )
     allowed, excluded = [], list(corpus.excluded)
     for source in corpus.sources:
         path = PurePosixPath(source.path)
-        if path.suffix.lower() in PROSE or any(p.lower() in DOC_PARTS for p in path.parts):
-            excluded.append({"path": source.path, "reason": "reference_documentation_policy"})
-        elif any(p.lower() in {"fixtures", "__fixtures__", "__snapshots__"} for p in path.parts):
+        if any(p.lower() in {"fixtures", "__fixtures__", "__snapshots__"} for p in path.parts):
             excluded.append({"path": source.path, "reason": "test_fixture_data"})
         elif path.name in {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "uv.lock"}:
             excluded.append({"path": source.path, "reason": "dependency_lockfile"})

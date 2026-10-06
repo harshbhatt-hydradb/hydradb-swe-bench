@@ -61,13 +61,41 @@ class HydraMemory:
             if remaining <= 0:
                 raise HydraError("HydraDB indexing deadline exceeded")
             started = time.monotonic()
-            response = self.client.request(
-                method,
-                path,
-                headers={"Authorization": "Bearer " + self.config.api_key, "API-Version": "2"},
-                timeout=min(30, remaining),
-                **kwargs,
-            )
+            try:
+                response = self.client.request(
+                    method,
+                    path,
+                    headers={"Authorization": "Bearer " + self.config.api_key, "API-Version": "2"},
+                    timeout=min(30, remaining),
+                    **kwargs,
+                )
+            except httpx.TransportError as exc:
+                remaining = deadline - time.monotonic() if deadline is not None else 30
+                # Only retry safe reads. An ingestion timeout can follow a successful
+                # upload; its acknowledgment must be recovered through source status.
+                retrying = (
+                    method == "GET"
+                    and isinstance(
+                        exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+                    )
+                    and attempt < 2
+                    and remaining > 0
+                )
+                delay = min(2**attempt, max(0, remaining)) if retrying else 0
+                self.report(
+                    "hydradb_transport_error",
+                    method=method,
+                    path=path,
+                    error_type=type(exc).__name__,
+                    retry=attempt,
+                    retrying=retrying,
+                    delay_seconds=delay,
+                    elapsed_seconds=round(time.monotonic() - started, 3),
+                )
+                if not retrying:
+                    raise
+                time.sleep(delay)
+                continue
             self.report(
                 "hydradb_request",
                 method=method,

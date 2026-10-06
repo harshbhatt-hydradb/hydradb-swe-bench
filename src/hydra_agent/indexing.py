@@ -62,6 +62,7 @@ SKIP_PARTS = {
     ".tox",
     ".next",
     ".ssh",
+    ".github",
 }
 SECRET_NAMES = {
     ".env",
@@ -112,6 +113,7 @@ def build_corpus(
     *,
     max_file_bytes: int = 500_000,
     max_total_bytes: int = 50_000_000,
+    extra_text_extensions: frozenset[str] = frozenset(),
 ) -> Corpus:
     if max_file_bytes <= 0 or max_total_bytes <= 0:
         raise ValueError("Index byte limits must be positive")
@@ -133,12 +135,16 @@ def build_corpus(
                 or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}
             ):
                 reason = "credential_filename"
-            elif path.suffix.lower() not in TEXT_EXTENSIONS and path.name not in {
-                "Dockerfile",
-                "Makefile",
-                "LICENSE",
-                "Gemfile",
-            }:
+            elif (
+                path.suffix.lower() not in TEXT_EXTENSIONS | extra_text_extensions
+                and path.name
+                not in {
+                    "Dockerfile",
+                    "Makefile",
+                    "LICENSE",
+                    "Gemfile",
+                }
+            ):
                 reason = "unsupported_extension"
             elif member.size > max_file_bytes:
                 reason = "oversized_file"

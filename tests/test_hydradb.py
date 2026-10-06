@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from hydra_agent import hydradb
 from hydra_agent.config import HydraConfig
 from hydra_agent.hydradb import HydraError, HydraMemory
 from hydra_agent.indexing import build_corpus, reuse_corpus
@@ -113,6 +114,100 @@ def memory_for(corpus, api, **kwargs):
         poll_seconds=0,
         **kwargs,
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ReadTimeout,
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+    ],
+)
+def test_status_transport_retries_preserve_scope_and_keep_errors_out_of_trace(
+    corpus, monkeypatch, failure
+):
+    requests, sleeps, events = [], [], []
+    monkeypatch.setattr(hydradb, "time", SimpleNamespace(monotonic=lambda: 0, sleep=sleeps.append))
+    params = [("database", "database"), ("collection", "attempt_attempt")]
+    params += [("ids", source.id) for source in corpus.sources]
+    statuses = [{"id": source.id, "indexing_status": "completed"} for source in corpus.sources]
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) < 3:
+            raise failure("private-key must not appear in the trace", request=request)
+        return envelope({"statuses": statuses})
+
+    memory = memory_for(corpus, handler, report=lambda kind, **data: events.append((kind, data)))
+    try:
+        result = memory._request("GET", "/context/status", params=params, deadline=100)
+        assert result == {"statuses": statuses}
+        assert len(requests) == 3
+        assert all(r.method == "GET" and r.url == requests[0].url for r in requests)
+        assert requests[0].url.params == httpx.QueryParams(params)
+        assert sleeps == [1, 2]
+        assert [data["retrying"] for kind, data in events if kind == "hydradb_transport_error"] == [
+            True,
+            True,
+        ]
+        assert "private-key" not in json.dumps(events)
+    finally:
+        memory.close()
+
+
+@pytest.mark.parametrize(
+    "method,path,failure,attempts",
+    [
+        ("GET", "/context/status", httpx.ReadTimeout, 3),
+        ("GET", "/context/status", httpx.LocalProtocolError, 1),
+        ("POST", "/context/ingest", httpx.ReadTimeout, 1),
+    ],
+)
+def test_transport_retries_are_bounded_and_do_not_repeat_ambiguous_uploads(
+    corpus, monkeypatch, method, path, failure, attempts
+):
+    requests, sleeps = [], []
+    monkeypatch.setattr(hydradb, "time", SimpleNamespace(monotonic=lambda: 0, sleep=sleeps.append))
+
+    def handler(request):
+        requests.append(request)
+        raise failure("transport failure", request=request)
+
+    memory = memory_for(corpus, handler)
+    try:
+        with pytest.raises(failure, match="transport failure"):
+            memory._request(method, path)
+        assert len(requests) == attempts
+        assert sleeps == ([1, 2] if attempts == 3 else [])
+    finally:
+        memory.close()
+
+
+def test_status_retry_honors_remaining_indexing_deadline(corpus, monkeypatch):
+    now, sleeps, requests = [0], [], []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(hydradb, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep))
+
+    def handler(request):
+        requests.append(request)
+        assert request.extensions["timeout"]["read"] == 0.5
+        now[0] += 0.25
+        raise httpx.ReadTimeout("status timed out", request=request)
+
+    memory = memory_for(corpus, handler)
+    try:
+        with pytest.raises(HydraError, match="deadline exceeded"):
+            memory._request("GET", "/context/status", deadline=0.5)
+        assert len(requests) == 1 and sleeps == [0.25] and now[0] == 0.5
+    finally:
+        memory.close()
 
 
 def test_snapshot_manifest_and_exclusions(corpus):

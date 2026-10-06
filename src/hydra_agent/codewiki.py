@@ -25,7 +25,13 @@ from .codewiki_data import (
     prepare_record,
 )
 from .codewiki_explore import ExplorationConfig
-from .codewiki_memory import IndexRetryExhausted, index_corpus, open_index
+from .codewiki_memory import (
+    DEFAULT_INDEX_WORKERS,
+    MAX_INDEX_WORKERS,
+    IndexRetryExhausted,
+    index_corpus,
+    open_index,
+)
 from .codewiki_terminal import CodeWikiTerminal
 from .config import AzureConfig, HydraConfig, openrouter_config
 from .memory import MemoryScope
@@ -33,9 +39,8 @@ from .model import AzureModel
 
 # Fixed run shape. Token totals are recorded; they do not stop a run.
 PAGES = 6
-AGENT_STEPS = 10
+AGENT_STEPS = 20
 INDEX_TIMEOUT = 24 * 60 * 60
-INDEX_WORKERS = 4
 INDEX_ATTEMPTS = 2
 SURVEY = ExplorationConfig()
 
@@ -57,6 +62,14 @@ def parser():
     p.add_argument("--output", type=Path, default=Path("runs/codewiki"))
     p.add_argument("--cache", type=Path, default=Path("targets/codewiki"))
     p.add_argument("--env-file", type=Path, default=Path(".env"))
+    p.add_argument(
+        "--index-workers",
+        type=int,
+        choices=range(1, MAX_INDEX_WORKERS + 1),
+        metavar=f"1-{MAX_INDEX_WORKERS}",
+        default=DEFAULT_INDEX_WORKERS,
+        help=f"Concurrent upload/status requests, including final verification (default: {DEFAULT_INDEX_WORKERS})",
+    )
     p.add_argument(
         "--plain", action="store_true", help="Plain terminal logs without colors or animation"
     )
@@ -224,7 +237,9 @@ def report(root, campaign):
     )
 
 
-def run_paper_judges(output: Path, repo: str, env_file: Path, plain: bool) -> int:
+def run_paper_judges(
+    output: Path, repo: str, env_file: Path, plain: bool, *, campaign_lock_fd: int | None = None
+) -> int:
     """Score one repository with the CodeWikiBench paper's three judges."""
     script = Path(__file__).resolve().parents[2] / "scripts" / "run_codewiki_paper_panel.py"
     command = [
@@ -240,7 +255,13 @@ def run_paper_judges(output: Path, repo: str, env_file: Path, plain: bool) -> in
     ]
     if plain:
         command.append("--plain")
-    return subprocess.run(command, check=False).returncode
+    if campaign_lock_fd is not None:
+        command += ["--campaign-lock-fd", str(campaign_lock_fd)]
+    return subprocess.run(
+        command,
+        check=False,
+        pass_fds=() if campaign_lock_fd is None else (campaign_lock_fd,),
+    ).returncode
 
 
 def main(argv=None):
@@ -295,7 +316,12 @@ def main(argv=None):
         for repo_number, name in enumerate(names, 1):
             repo_root = root / name
             repo_root.mkdir(parents=True, exist_ok=True)
-            state = {"status": "running", "started_at": time.time(), "stage": stages[0]}
+            state = {
+                "status": "running",
+                "started_at": time.time(),
+                "stage": stages[0],
+                "index_workers": args.index_workers,
+            }
             state_path = repo_root / "run.json"
             score = None
             terminal.log(f"Repository {repo_number}/{len(names)}: {name}", contextual=False)
@@ -336,7 +362,7 @@ def main(argv=None):
                                 corpus,
                                 repo_root / "index-manifest.json",
                                 timeout=INDEX_TIMEOUT,
-                                workers=INDEX_WORKERS,
+                                workers=args.index_workers,
                                 max_attempts=INDEX_ATTEMPTS,
                                 max_failures=0,
                                 report=trace.emit,
@@ -355,7 +381,11 @@ def main(argv=None):
                             )
                             terminal.activity("Verifying existing HydraDB index")
                             memory = open_index(
-                                hydra, corpus, repo_root / "index-manifest.json", trace.emit
+                                hydra,
+                                corpus,
+                                repo_root / "index-manifest.json",
+                                trace.emit,
+                                workers=args.index_workers,
                             )
                             model = AzureModel(config)
                             try:
@@ -413,7 +443,9 @@ def main(argv=None):
                                 memory.close()
                     elif stage == "evaluate":
                         terminal.log("Judges: Gemini 2.5 Flash, GPT-OSS 120B, Kimi K2 · averaged")
-                        if run_paper_judges(root, name, args.env_file, args.plain):
+                        if run_paper_judges(
+                            root, name, args.env_file, args.plain, campaign_lock_fd=lock.fileno()
+                        ):
                             raise RuntimeError("Paper judge panel did not finish")
                         result = read_json(repo_root / "evaluation-paper-panel" / "result.json")
                         if result.get("status") != "completed":
@@ -466,10 +498,9 @@ def main(argv=None):
                     )
                 elif state["stage"] == "evaluate":
                     terminal.log(
-                        "Resume with the evaluate stage and the same --output, --repos and judge "
-                        "flags; saved wiki pages and successful judgments are reused. "
-                        "For budget errors, raise --max-judge-tokens / --max-judge-context-bytes "
-                        "or set them to 0 to disable those caps."
+                        "Resume with the evaluate stage and the same --output and --repos; "
+                        "saved wiki pages and successful judgments are reused. "
+                        "The paper panel fixes its judge models and protocol limits."
                     )
                 else:
                     terminal.log(

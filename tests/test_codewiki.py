@@ -51,8 +51,17 @@ def corpus(tmp_path):
 
 
 def test_code_only_corpus_and_metadata_boundary(corpus):
-    assert {s.path for s in corpus.sources} == {"src/shop.py", "test/test_shop.py"}
-    assert all("SECRET" not in s.text for s in corpus.sources)
+    assert {s.path for s in corpus.sources} == {
+        "src/shop.py",
+        "test/test_shop.py",
+        "docs/gold.py",
+        "README.md",
+    }
+    assert all(s.path == "docs/gold.py" or "SECRET_GOLD" not in s.text for s in corpus.sources)
+    assert all(s.path == "README.md" or "SECRET_REFERENCE" not in s.text for s in corpus.sources)
+    assert all(
+        "SECRET_FIXTURE" not in s.text and "SECRET_KEY" not in s.text for s in corpus.sources
+    )
     row = {
         "metadata": {
             "repo_name": "Chart.js",
@@ -70,9 +79,13 @@ def test_code_only_corpus_and_metadata_boundary(corpus):
 
 def test_agent_cannot_read_reference_or_escape(corpus, tmp_path):
     agent = DocumentationAgent(None, None, corpus, None, None)
-    for path in ("../evaluation/reference.json", ".env", "docs/gold.py", "/etc/passwd"):
+    for path in ("../evaluation/reference.json", ".env", "/etc/passwd"):
         with pytest.raises(ValueError):
             agent.tool("read_file", {"path": path, "start_line": 1, "end_line": 10})
+    assert (
+        "SECRET_GOLD"
+        in agent.tool("read_file", {"path": "docs/gold.py", "start_line": 1, "end_line": 1})["text"]
+    )
     result = agent.tool("read_file", {"path": "src/shop.py", "start_line": 1, "end_line": 10})
     assert result["text"] == "1: def checkout():\n2:     return 42"
     assert result["url"].endswith("/src/shop.py#L1-L2")
@@ -332,21 +345,26 @@ def test_generation_resume_and_input_change_detection(tmp_path, corpus):
                         ]
                     }
                 )
-            return "# Overview\n" + "The checkout function returns 42. " * 15
+            return (
+                "# Overview\n"
+                + "The checkout function returns 42. " * 15
+                + f"[source]({corpus.scope.repository}/blob/{corpus.scope.base_commit}/src/shop.py#L1-L2)"
+            )
 
     root = tmp_path / "wiki"
     metadata = {"repo_name": "shop", "commit_id": "a" * 40}
     generation = generate(Agent(), root, metadata, identity={"model": "fixture"})
     assert generation["status"] == "completed"
-    assert calls == ["outline", "overview"]
+    assert calls == ["outline", "overview", "review:overview"]
     assert [event["event"] for event in events] == [
         "outline_ready",
         "page_started",
+        "page_review_started",
         "page_completed",
     ]
     events.clear()
     generate(Agent(), root, metadata, identity={"model": "fixture"})
-    assert calls == ["outline", "overview"]
+    assert calls == ["outline", "overview", "review:overview"]
     assert events[0] == {"event": "outline_ready", "pages": 1, "resumed": True}
     assert events[1]["event"] == "page_reused"
     with pytest.raises(ValueError, match="settings/code changed"):

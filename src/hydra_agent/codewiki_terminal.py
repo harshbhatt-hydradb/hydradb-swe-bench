@@ -120,10 +120,25 @@ class CodeWikiTerminal:
         if kind == "codewiki_database":
             self.activity(event["message"])
         elif kind == "codewiki_index_workers":
-            self.log(f"Index requests: {event['workers']} concurrent · batches of 20 sources")
+            self.log(
+                f"Index requests: {event['workers']} concurrent · rolling pool · batches of 20 sources"
+            )
             self.log(f"Upload limit: {event.get('max_attempts', 2)} attempts/source across resumes")
         elif kind == "codewiki_index_resume":
             self.activity(f"Revalidating {event['sources']:,} previously uploaded sources")
+        elif kind == "codewiki_index_revalidated":
+            self.progress(
+                kind,
+                event["checked"],
+                event["total"],
+                f"Sources revalidated · {event['completed']:,} ready",
+            )
+        elif kind == "codewiki_verify_workers":
+            self.activity(
+                f"Verifying {event['sources']:,} sources · {event['workers']} concurrent requests"
+            )
+        elif kind == "codewiki_index_verified":
+            self.progress(kind, event["checked"], event["total"], "Sources verified")
         elif kind == "codewiki_upload":
             self.progress(kind, event["uploaded"], event["total"], "Sources uploaded")
         elif kind == "codewiki_indexing":
@@ -149,6 +164,12 @@ class CodeWikiTerminal:
                     f"HydraDB HTTP {event['status']} · retry {event['retry'] + 1}/2",
                     style="yellow",
                 )
+        elif kind == "hydradb_transport_error" and event["retrying"]:
+            self.log(
+                f"HydraDB {event['method']} {event['path']} · {event['error_type']} · "
+                f"retry {event['retry'] + 1}/2 in {event['delay_seconds']:g}s",
+                style="yellow",
+            )
         elif kind == "hydradb_reused":
             self.activity(f"Existing index verified · {event['source_count']:,} sources")
         elif kind == "outline_ready":
@@ -176,10 +197,13 @@ class CodeWikiTerminal:
             self.activity(f"Reusing retrieval · {event['hits']} evidence chunks")
         elif kind == "artifact_retry":
             self.log(f"{event['label']} · correcting artifact · {event['error']}", style="yellow")
-        elif kind in ("page_started", "page_completed", "page_reused"):
-            verb = {"page_started": "Writing", "page_completed": "Saved", "page_reused": "Reusing"}[
-                kind
-            ]
+        elif kind in ("page_started", "page_review_started", "page_completed", "page_reused"):
+            verb = {
+                "page_started": "Writing",
+                "page_review_started": "Reviewing",
+                "page_completed": "Saved",
+                "page_reused": "Reusing",
+            }[kind]
             self.activity(f"{verb} page {event['number']}/{event['total']} · {event['title']}")
         elif kind == "agent_task":
             if event["label"] == "outline":

@@ -44,7 +44,7 @@ Image work still needs sufficient disk and RAM (default 120 GiB free on the host
 and Docker VM). Running invokes the configured model and HydraDB services.
 
 See the [pipeline guide](docs/swe-bench-pipeline.md) for artifacts, recovery behavior,
-and evaluation boundaries, and the [technical report](technical_report.md) for the
+and evaluation boundaries, and the [SWE-bench protocol](docs/swe-bench-protocol.md) for the
 experiment. Saved run metadata still pins the dataset, model settings, and code;
 you do not need to manage it by hand.
 
